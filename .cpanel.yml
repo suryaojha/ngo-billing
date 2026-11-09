@@ -7,5 +7,5 @@
 deployment:
   tasks:
     - export DEPLOYPATH=/home/reli446436/public_html/
-    - /bin/cp login.php logout.php billing.php inventory.php reports.php superadmin.php team.php ui.php $DEPLOYPATH
+    - /bin/cp login.php logout.php billing.php inventory.php reports.php superadmin.php team.php export.php xlsx.php ui.php $DEPLOYPATH
     - /bin/cp index.php admin.php $DEPLOYPATH

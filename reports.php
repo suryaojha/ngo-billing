@@ -103,18 +103,30 @@ $company   = load_company($pdo, $invoice ? ($invoice['admin_id'] ?: $scope_admin
  * Invoice list
  * ------------------------------------------------------------------ */
 $recent_invoices = [];
+$inv_total = 0; $inv_sum = 0.0; $page = 1; $per = 25;
+$fq = trim((string)($_GET['q'] ?? '')); $fd1 = (string)($_GET['d1'] ?? ''); $fd2 = (string)($_GET['d2'] ?? '');
 if (!$invoice) {
-    $sql = "SELECT i.*, a.full_name AS admin_name, c.full_name AS made_by, COUNT(ii.id) AS item_count
-            FROM invoices i
-            LEFT JOIN invoice_items ii ON ii.invoice_id=i.id
-            LEFT JOIN users a ON a.id=i.admin_id
-            LEFT JOIN users c ON c.id=i.created_by
-            WHERE i.status=1" . ($list_admin ? " AND i.admin_id=?" : "") . ($role === 'staff' ? " AND i.created_by=" . (int)$_SESSION['user_id'] : "") . "
-            GROUP BY i.id, a.full_name, c.full_name ORDER BY i.created_at DESC LIMIT 1000";
-    $st = $pdo->prepare($sql);
-    $st->execute($list_admin ? [$list_admin] : []);
+    [$page, $per] = page_params(25);
+    [$where, $params] = invoice_where($role, $list_admin, $_GET, true);   // search / date filters run in SQL, so they cover every page
+
+    $cs = $pdo->prepare("SELECT COUNT(*) AS c, COALESCE(SUM(i.total_amount),0) AS s FROM invoices i $where");
+    $cs->execute($params);
+    $row = $cs->fetch();
+    $inv_total = (int)$row['c']; $inv_sum = (float)$row['s'];
+    $page = min($page, max(1, (int)ceil($inv_total / $per)));
+    $offset = ($page - 1) * $per;
+
+    $st = $pdo->prepare("SELECT i.*, a.full_name AS admin_name, c.full_name AS made_by,
+                                (SELECT COUNT(*) FROM invoice_items ii WHERE ii.invoice_id=i.id) AS item_count
+                         FROM invoices i
+                         LEFT JOIN users a ON a.id=i.admin_id
+                         LEFT JOIN users c ON c.id=i.created_by
+                         $where ORDER BY i.created_at DESC, i.id DESC LIMIT " . (int)$per . " OFFSET " . (int)$offset);
+    $st->execute($params);
     $recent_invoices = $st->fetchAll();
 }
+// query string that carries the current filters into the Excel export
+$export_qs = http_build_query(array_filter(['admin' => $filter_admin ?: '', 'q' => $fq, 'd1' => $fd1, 'd2' => $fd2], fn($v) => $v !== ''));
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -255,20 +267,32 @@ if (!$invoice) {
             <div class="card-title">📊 Invoices
                 <a class="btn btn-primary btn-sm" href="billing.php<?php echo $is_super && $filter_admin ? '?for=' . $filter_admin : ''; ?>">＋ New bill</a>
             </div>
-            <div class="filter-row">
+            <form method="GET" class="filter-row">
+                <input type="hidden" name="per" value="<?php echo (int)$per; ?>">
                 <?php if ($is_super): ?>
-                <select onchange="location.href='reports.php'+(this.value?'?admin='+this.value:'')">
+                <select name="admin" onchange="this.form.submit()">
                     <option value="">All admins</option>
                     <?php foreach ($admins as $a): ?>
                         <option value="<?php echo (int)$a['id']; ?>" <?php echo $filter_admin === (int)$a['id'] ? 'selected' : ''; ?>><?php echo e($a['full_name']); ?></option>
                     <?php endforeach; ?>
                 </select>
                 <?php endif; ?>
-                <input type="search" id="q" class="search-bar" placeholder="🔍 Customer / invoice no / phone" oninput="filterList()">
-                <input type="date" id="d1" onchange="filterList()" title="From">
-                <input type="date" id="d2" onchange="filterList()" title="To">
+                <input type="search" name="q" class="search-bar" value="<?php echo e($fq); ?>" placeholder="🔍 Customer / invoice no / phone">
+                <input type="date" name="d1" value="<?php echo e($fd1); ?>" title="From date">
+                <input type="date" name="d2" value="<?php echo e($fd2); ?>" title="To date">
+                <button class="btn btn-primary btn-sm">Search</button>
+                <?php if ($fq !== '' || $fd1 !== '' || $fd2 !== '' || $filter_admin): ?><a class="btn btn-light btn-sm" href="reports.php">Reset</a><?php endif; ?>
+            </form>
+            <div class="sumline">
+                <span>Invoices: <strong><?php echo number_format($inv_total); ?></strong></span>
+                <span>Total: <strong>₹<?php echo number_format($inv_sum, 2); ?></strong></span>
+                <?php if ($can_cancel): ?>
+                <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+                    <a class="btn btn-excel btn-sm" href="export.php?type=invoices<?php echo $export_qs ? '&' . e($export_qs) : ''; ?>" title="Download the invoices matching the filters above">⬇ Excel (this list)</a>
+                    <a class="btn btn-light btn-sm" href="export.php?type=all<?php echo $filter_admin ? '&admin=' . $filter_admin : ''; ?>" title="Stock + every invoice + items">💾 Full backup</a>
+                </span>
+                <?php endif; ?>
             </div>
-            <div class="sumline"><span>Invoices: <strong id="sCount">0</strong></span><span>Total: <strong id="sTotal">₹0</strong></span></div>
 
             <table class="data rt" id="invTable">
                 <thead>
@@ -276,8 +300,7 @@ if (!$invoice) {
                 </thead>
                 <tbody>
                 <?php foreach ($recent_invoices as $inv): ?>
-                    <tr data-date="<?php echo date('Y-m-d', strtotime($inv['created_at'])); ?>" data-amt="<?php echo (float)$inv['total_amount']; ?>"
-                        data-text="<?php echo e(strtolower($inv['invoice_no'] . ' ' . $inv['customer_name'] . ' ' . $inv['customer_phone'])); ?>">
+                    <tr>
                         <td data-label="Invoice"><strong>#<?php echo e($inv['invoice_no']); ?></strong></td>
                         <?php if ($is_super): ?><td data-label="Admin"><span class="badge b-blue"><?php echo e($inv['admin_name'] ?? '—'); ?></span></td><?php endif; ?>
                         <td data-label="Customer"><?php echo e($inv['customer_name']); ?><?php if (!empty($inv['customer_phone'])): ?><br><small class="muted" style="color:var(--muted)"><?php echo e($inv['customer_phone']); ?></small><?php endif; ?></td>
@@ -297,27 +320,13 @@ if (!$invoice) {
                     </tr>
                 <?php endforeach; ?>
                 <?php if (empty($recent_invoices)): ?>
-                    <tr><td colspan="8" class="no-label" style="text-align:center;color:#94a3b8;padding:30px;">No invoices yet.</td></tr>
+                    <tr><td colspan="8" class="no-label" style="text-align:center;color:#94a3b8;padding:30px;"><?php echo ($fq !== '' || $fd1 !== '' || $fd2 !== '') ? 'No invoices match these filters.' : 'No invoices yet.'; ?></td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
+            <?php echo pager($inv_total, $page, $per); ?>
         </div>
     </div>
-    <script>
-    function filterList() {
-        const q = document.getElementById('q').value.toLowerCase().trim();
-        const d1 = document.getElementById('d1').value, d2 = document.getElementById('d2').value;
-        let n = 0, sum = 0;
-        document.querySelectorAll('#invTable tbody tr[data-date]').forEach(tr => {
-            const ok = (!q || tr.dataset.text.includes(q)) && (!d1 || tr.dataset.date >= d1) && (!d2 || tr.dataset.date <= d2);
-            tr.style.display = ok ? '' : 'none';
-            if (ok) { n++; sum += parseFloat(tr.dataset.amt) || 0; }
-        });
-        document.getElementById('sCount').textContent = n;
-        document.getElementById('sTotal').textContent = '₹' + sum.toLocaleString('en-IN', {maximumFractionDigits: 2});
-    }
-    filterList();
-    </script>
 <?php endif; ?>
 </body>
 </html>

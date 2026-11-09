@@ -1,6 +1,22 @@
 <?php
 session_start();
 require_once 'config.php';
+require_once 'ui.php';     // shared helpers (pagination, escaping)
+require_once 'xlsx.php';   // Excel export
+
+// WHERE clause for the donations list/export: search (name/email/phone) + status
+function donation_filter(array $g): array {
+    $w = ['d.IsActive=1']; $p = [];
+    $st = (string)($g['dstatus'] ?? '');
+    if (in_array($st, ['Pending', 'Approved', 'Rejected'], true)) { $w[] = 'd.Status=?'; $p[] = $st; }
+    $q = trim(preg_replace('/[^\x20-\x7E]/', '', (string)($g['dq'] ?? '')));
+    if ($q !== '') {
+        $like = '%' . addcslashes($q, '%_\\') . '%';
+        $w[] = '(d.DonorName LIKE ? OR d.Email LIKE ? OR d.Phone LIKE ?)';
+        array_push($p, $like, $like, $like);
+    }
+    return [' WHERE ' . implode(' AND ', $w), $p];
+}
 
 if($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['login'])){
     try{
@@ -27,6 +43,43 @@ if(isset($_POST['logout'])){
 }
 
 if(isset($_SESSION['admin'])){
+    // ---- Excel export: ?export=donations (current filter) or ?export=backup (whole website) ----
+    if(isset($_GET['export'])){
+        try{
+            $stamp=date('Y-m-d_Hi'); $sheets=[];
+            $donationSheet=function(array $g) use ($pdo){
+                [$where,$params]=donation_filter($g);
+                $st=$pdo->prepare("SELECT d.*, c.Title AS CampaignTitle FROM Donations d LEFT JOIN Campaigns c ON c.CampaignID=d.CampaignID $where ORDER BY d.DonationDate DESC, d.DonationID DESC");
+                $st->execute($params);
+                $rows=[];
+                foreach($st->fetchAll(PDO::FETCH_ASSOC) as $d){
+                    $rows[]=[(int)$d['DonationID'],date('Y-m-d H:i',strtotime($d['DonationDate'])),$d['DonorName'],$d['Email'],$d['Phone'],
+                        (float)$d['Amount'],$d['CampaignTitle']??'General',$d['PaymentMethod']??($d['DonationType']??''),$d['TransactionID']??'',$d['Status'],$d['Message']];
+                }
+                return ['headers'=>['ID','Date','Donor','Email','Phone','Amount (₹)','Campaign','Method','Reference','Status','Message'],'rows'=>$rows,'money'=>[5]];
+            };
+            if($_GET['export']==='donations'){
+                $sheets['Donations']=$donationSheet($_GET);
+                $file="donations_$stamp";
+            }else{
+                $sheets['Donations']=$donationSheet([]);
+                // every other website table, as-is (users/passwords are never exported)
+                foreach(['Campaigns'=>'CampaignID','Events'=>'EventID','Partners'=>'PartnerID','Testimonials'=>'TestimonialID','Gallery'=>'GalleryID','MediaGallery'=>'MediaID','TeamMembers'=>'TeamID','ContactInfo'=>'ContactID','AdminSettings'=>'SettingID'] as $tbl=>$pk){
+                    try{
+                        $data=$pdo->query("SELECT * FROM `$tbl` ORDER BY `$pk`")->fetchAll(PDO::FETCH_ASSOC);
+                        $headers=$data?array_keys($data[0]):array_column($pdo->query("SHOW COLUMNS FROM `$tbl`")->fetchAll(PDO::FETCH_ASSOC),'Field');
+                        $rows=array_map(fn($r)=>array_map(fn($v)=>$v===null?'':(string)$v,array_values($r)),$data);
+                        $sheets[$tbl]=['headers'=>$headers,'rows'=>$rows];
+                    }catch(Exception $e){ /* table missing on this install: skip */ }
+                }
+                $file="website_backup_$stamp";
+            }
+            send_workbook($file,$sheets);
+        }catch(Throwable $e){
+            error_log('Website export error: '.$e->getMessage());
+            http_response_code(500); die('Could not create the Excel file.');
+        }
+    }
     // AJAX Handlers
     if(isset($_POST['ajax'])){
         header('Content-Type: application/json');
@@ -126,13 +179,16 @@ if(isset($_SESSION['admin'])){
     if(isset($_POST['approve'])){
         try{
             $stmt=$pdo->prepare("SELECT * FROM Donations WHERE DonationID=?");
-        $stmt->execute([(int)$_POST['id']]);
-        $donation=$stmt->fetch(PDO::FETCH_ASSOC);
-            $pdo->prepare("UPDATE Donations SET Status='Approved' WHERE DonationID=?")->execute([$_POST['id']]);
-            if($donation['CampaignID']){
-                $pdo->prepare("UPDATE Campaigns SET CurrentAmount=CurrentAmount+? WHERE CampaignID=?")->execute([$donation['Amount'],$donation['CampaignID']]);
+            $stmt->execute([(int)$_POST['id']]);
+            $donation=$stmt->fetch(PDO::FETCH_ASSOC);
+            // only credit the campaign the FIRST time it becomes Approved (clicking twice must not double-count)
+            if($donation && $donation['Status']!=='Approved'){
+                $pdo->prepare("UPDATE Donations SET Status='Approved' WHERE DonationID=?")->execute([(int)$_POST['id']]);
+                if($donation['CampaignID']){
+                    $pdo->prepare("UPDATE Campaigns SET CurrentAmount=CurrentAmount+? WHERE CampaignID=?")->execute([$donation['Amount'],$donation['CampaignID']]);
+                }
             }
-            header('Location: admin.php');
+            header('Location: admin.php?tab=donations'.(!empty($_POST['back'])?'&'.preg_replace('/[^A-Za-z0-9=&%_.+-]/','',$_POST['back']):''));
             exit;
         }catch(Exception $e){
             error_log("Donation approval error: " . $e->getMessage());
@@ -140,8 +196,17 @@ if(isset($_SESSION['admin'])){
     }
     if(isset($_POST['reject'])){
         try{
-            $pdo->prepare("UPDATE Donations SET Status='Rejected' WHERE DonationID=?")->execute([$_POST['id']]);
-            header('Location: admin.php');
+            $stmt=$pdo->prepare("SELECT * FROM Donations WHERE DonationID=?");
+            $stmt->execute([(int)$_POST['id']]);
+            $donation=$stmt->fetch(PDO::FETCH_ASSOC);
+            if($donation && $donation['Status']!=='Rejected'){
+                // rejecting something that was already counted takes it back out of the campaign total
+                if($donation['Status']==='Approved' && $donation['CampaignID']){
+                    $pdo->prepare("UPDATE Campaigns SET CurrentAmount=GREATEST(0,CurrentAmount-?) WHERE CampaignID=?")->execute([$donation['Amount'],$donation['CampaignID']]);
+                }
+                $pdo->prepare("UPDATE Donations SET Status='Rejected' WHERE DonationID=?")->execute([(int)$_POST['id']]);
+            }
+            header('Location: admin.php?tab=donations'.(!empty($_POST['back'])?'&'.preg_replace('/[^A-Za-z0-9=&%_.+-]/','',$_POST['back']):''));
             exit;
         }catch(Exception $e){
             error_log("Donation rejection error: " . $e->getMessage());
@@ -593,7 +658,15 @@ if(isset($_SESSION['admin'])){
     }
     
     try{
-        $donations=$pdo->query("SELECT * FROM Donations WHERE IsActive=1 ORDER BY DonationDate DESC")->fetchAll(PDO::FETCH_ASSOC);
+        // Donations: server-side search/status filter + pagination
+        [$dwhere,$dparams]=donation_filter($_GET);
+        [$dpage,$dper]=page_params(25);
+        $dc=$pdo->prepare("SELECT COUNT(*) FROM Donations d $dwhere"); $dc->execute($dparams);
+        $donationTotal=(int)$dc->fetchColumn();
+        $dpage=min($dpage,max(1,(int)ceil($donationTotal/$dper)));
+        $ds=$pdo->prepare("SELECT d.*, c.Title AS CampaignTitle FROM Donations d LEFT JOIN Campaigns c ON c.CampaignID=d.CampaignID $dwhere ORDER BY d.DonationDate DESC, d.DonationID DESC LIMIT ".(int)$dper." OFFSET ".(int)(($dpage-1)*$dper));
+        $ds->execute($dparams);
+        $donations=$ds->fetchAll(PDO::FETCH_ASSOC);
         $gallery=$pdo->query("SELECT * FROM Gallery WHERE IsActive=1 ORDER BY UploadDate DESC")->fetchAll(PDO::FETCH_ASSOC);
         $mediaGallery=$pdo->query("SELECT * FROM MediaGallery WHERE IsActive=1 ORDER BY DisplayOrder,UploadDate DESC")->fetchAll(PDO::FETCH_ASSOC);
         $partners=$pdo->query("SELECT * FROM Partners WHERE IsActive=1 ORDER BY DisplayOrder,CreatedDate DESC")->fetchAll(PDO::FETCH_ASSOC);
@@ -626,7 +699,7 @@ if(isset($_SESSION['admin'])){
         // Use AdminSettings primary color if available, otherwise fallback to ThemeSettings
         if($primaryColorAdmin) $themeSettings['BackgroundColor'] = $primaryColorAdmin;
     }catch(Exception $e){
-        $donations=[];$gallery=[];$mediaGallery=[];$partners=[];$testimonials=[];$campaigns=[];$events=[];$contact=null;$qrCode='';$logoPath='';$bgPath='';$siteHeading='Relief Wave Foundation';$heroVideo='';$themeColor='gray';$secondaryColor='#495057';$gradientType='linear';$gradientDirection='135deg';$fontColor='#333333';$primaryColorAdmin='#667eea';$heroFontColor='#ffffff';$bgOpacity='0.3';
+        $donations=[];$donationTotal=0;$dpage=1;$dper=25;$gallery=[];$mediaGallery=[];$partners=[];$testimonials=[];$campaigns=[];$events=[];$contact=null;$qrCode='';$logoPath='';$bgPath='';$siteHeading='Relief Wave Foundation';$heroVideo='';$themeColor='gray';$secondaryColor='#495057';$gradientType='linear';$gradientDirection='135deg';$fontColor='#333333';$primaryColorAdmin='#667eea';$heroFontColor='#ffffff';$bgOpacity='0.3';
         $themeSettings=['BackgroundColor'=>'#667eea','HeroTitle'=>'Together for Hope, Together for Change','HeroSubtitle'=>'Empowering communities across India','ShowAboutSection'=>1,'ShowStatsSection'=>1,'ShowProgramsSection'=>1,'ShowGallerySection'=>1,'ShowPartnersSection'=>1];
         $upiId='reliefwave@paytm';
     }
@@ -673,6 +746,20 @@ table td{vertical-align:middle}
 .upload-section h3{color:#0f172a}
 .media-item,.preview-card{border-radius:16px}
 .toggle-switch input:checked+.slider,input:checked+.slider{background:#0f766e}
+.dfilter{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:4px 0 8px}
+.dfilter input[type=search],.dfilter select{padding:10px 12px;border:1.5px solid #cbd5e1;border-radius:10px;font:inherit;background:#fff}
+.dfilter input[type=search]{min-width:220px}
+.dfilter .btn-small{border-radius:10px}
+.dfilter .dexp{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.dbadge{display:inline-block;padding:3px 10px;border-radius:99px;font-size:.78rem;font-weight:700}
+.d-pending{background:#fef3c7;color:#92400e}.d-approved{background:#dcfce7;color:#166534}.d-rejected{background:#fee2e2;color:#991b1b}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:14px;font-size:13px;color:#64748b}
+.pager-links{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.pager-links a,.pager-links .cur,.pager-links .off,.pager-links .dots{min-width:36px;height:36px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px}
+.pager-links a{background:#fff;border:1px solid #e2e8f0;color:#0f172a}.pager-links a:hover{border-color:#0f766e;color:#0f766e}
+.pager-links .cur{background:#0f766e;color:#fff}.pager-links .off{color:#cbd5e1;border:1px solid #f1f5f9}
+.pager-per select{padding:6px 10px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}
+@media(max-width:768px){.dfilter input[type=search]{min-width:0;width:100%}.dfilter .dexp{margin-left:0;width:100%}}
 @media(max-width:768px){
  .header{flex-direction:row;flex-wrap:wrap;padding:12px 14px}
  .header h1{font-size:1.05rem}
@@ -784,34 +871,58 @@ table td{vertical-align:middle}
 
 <div class="tab-content <?= $currentTab==='donations'?'active':'' ?>" id="donations">
 <h2>💰 Manage Donations</h2>
+<?php $dback=http_build_query(array_filter(['dq'=>$_GET['dq']??'','dstatus'=>$_GET['dstatus']??'','per'=>$_GET['per']??'','page'=>$_GET['page']??''],fn($v)=>$v!=='')); ?>
+<form method="GET" class="dfilter">
+<input type="hidden" name="tab" value="donations">
+<input type="hidden" name="per" value="<?= (int)$dper ?>">
+<input type="search" name="dq" value="<?= htmlspecialchars($_GET['dq']??'') ?>" placeholder="🔍 Name / email / phone">
+<select name="dstatus" onchange="this.form.submit()">
+<option value="">All status</option>
+<?php foreach(['Pending','Approved','Rejected'] as $s): ?><option value="<?= $s ?>" <?= ($_GET['dstatus']??'')===$s?'selected':'' ?>><?= $s ?></option><?php endforeach; ?>
+</select>
+<button class="btn btn-small" type="submit">Search</button>
+<?php if(!empty($_GET['dq'])||!empty($_GET['dstatus'])): ?><a class="btn btn-small" style="background:#64748b;text-decoration:none" href="admin.php?tab=donations">Reset</a><?php endif; ?>
+<span class="dexp">
+<a class="btn btn-small" style="background:#107c41;text-decoration:none" href="admin.php?export=donations&<?= htmlspecialchars(http_build_query(array_filter(['dq'=>$_GET['dq']??'','dstatus'=>$_GET['dstatus']??''],fn($v)=>$v!==''))) ?>">⬇ Excel (this list)</a>
+<a class="btn btn-small" style="background:#475569;text-decoration:none" href="admin.php?export=backup" title="Donations, campaigns, events, partners, testimonials, gallery, contact and settings">💾 Full website backup</a>
+</span>
+</form>
+<p style="color:#64748b;font-size:.9rem;margin:6px 0"><?= number_format($donationTotal) ?> donation<?= $donationTotal===1?'':'s' ?> · Pending ones need your approval before they count in the website totals.</p>
 <table>
 <tr>
 <th>ID</th>
-<th>Name</th>
-<th>Email</th>
+<th>Date</th>
+<th>Donor</th>
 <th>Amount</th>
-<th>Type</th>
+<th>Campaign</th>
+<th>Method / Ref</th>
 <th>Status</th>
 <th>Actions</th>
 </tr>
-<?php foreach($donations as $d): ?>
+<?php foreach($donations as $d):
+  $dm=$d['PaymentMethod']??($d['DonationType']??'—'); $dr=$d['TransactionID']??''; $ds_=$d['Status']; ?>
 <tr>
-<td><?= $d['DonationID'] ?></td>
-<td><?= htmlspecialchars($d['DonorName']) ?></td>
-<td><?= htmlspecialchars($d['Email']) ?></td>
-<td>₹<?= number_format($d['Amount'],2) ?></td>
-<td><?= htmlspecialchars($d['PaymentMethod']??'N/A') ?></td>
-<td><?= $d['Status'] ?></td>
+<td><?= (int)$d['DonationID'] ?></td>
+<td><?= htmlspecialchars(date('d-M-Y H:i',strtotime($d['DonationDate']))) ?></td>
+<td><strong><?= htmlspecialchars($d['DonorName']) ?></strong><br><small style="color:#64748b"><?= htmlspecialchars($d['Email']) ?> · <?= htmlspecialchars($d['Phone']) ?></small></td>
+<td><strong>₹<?= number_format($d['Amount'],2) ?></strong></td>
+<td><?= htmlspecialchars($d['CampaignTitle']??'General') ?></td>
+<td><?= htmlspecialchars($dm) ?><?php if($dr): ?><br><small style="color:#64748b"><?= htmlspecialchars($dr) ?></small><?php endif; ?></td>
+<td><span class="dbadge d-<?= htmlspecialchars(strtolower($ds_)) ?>"><?= htmlspecialchars($ds_) ?></span></td>
 <td>
 <form method="POST" style="display:inline">
-<input type="hidden" name="id" value="<?= $d['DonationID'] ?>">
-<button type="submit" name="approve" class="btn-small btn-success">✔ Approve</button>
-<button type="submit" name="reject" class="btn-small btn-danger">✖ Reject</button>
+<input type="hidden" name="id" value="<?= (int)$d['DonationID'] ?>">
+<input type="hidden" name="back" value="<?= htmlspecialchars($dback) ?>">
+<?php if($ds_!=='Approved'): ?><button type="submit" name="approve" class="btn-small btn-success">✔ Approve</button><?php endif; ?>
+<?php if($ds_!=='Rejected'): ?><button type="submit" name="reject" class="btn-small btn-danger" onclick="return confirm('Reject this donation?')">✖ Reject</button><?php endif; ?>
 </form>
 </td>
 </tr>
 <?php endforeach; ?>
+<?php if(empty($donations)): ?><tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:26px">No donations found.</td></tr><?php endif; ?>
 </table>
+<?php $_GET['tab']='donations'; /* page links must stay on this tab */ ?>
+<?= pager($donationTotal,$dpage,$dper) ?>
 </div>
 
 <div class="tab-content <?= $currentTab==='media'?'active':'' ?>" id="media">

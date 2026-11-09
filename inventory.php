@@ -158,6 +158,16 @@ foreach ($products as $p) {
     if (in_array(expiry_state($p['expiry']), ['expired', 'soon'], true)) $exp_count++;
 }
 
+// Search + status filter, then pagination (stats above always cover the whole stock, not just this page)
+$fq = trim((string)($_GET['q'] ?? ''));
+$fstatus = in_array($_GET['status'] ?? '', ['out', 'low', 'exp'], true) ? $_GET['status'] : '';
+$filtered = filter_products($products, $fq, $fstatus);
+[$page, $per] = page_params(25);
+$total_rows = count($filtered);
+$page = min($page, max(1, (int)ceil($total_rows / $per)));
+$page_products = array_slice($filtered, ($page - 1) * $per, $per);
+$export_qs = http_build_query(array_filter(['admin' => $filter_admin ?: '', 'q' => $fq, 'status' => $fstatus], fn($v) => $v !== ''));
+
 // Per-admin overview (superadmin): cards in the "all admins" view + live info panel in the add-stock form
 $overview = [];
 if ($is_super) {
@@ -433,28 +443,39 @@ html{scroll-behavior:smooth}
                       <a class="btn btn-light btn-sm" href="inventory.php">← All admins</a></span>
             <?php endif; ?>
         </div>
-        <div class="filter-row">
+        <form method="GET" class="filter-row">
+            <input type="hidden" name="per" value="<?php echo (int)$per; ?>">
             <?php if ($is_super): ?>
-            <select onchange="location.href='inventory.php'+(this.value?'?admin='+this.value:'')">
+            <select name="admin" onchange="this.form.submit()">
                 <option value="">All admins</option>
                 <?php foreach ($admins as $a): ?>
                     <option value="<?php echo (int)$a['id']; ?>" <?php echo $filter_admin === (int)$a['id'] ? 'selected' : ''; ?>><?php echo e($a['full_name']); ?></option>
                 <?php endforeach; ?>
             </select>
             <?php endif; ?>
-            <input type="search" id="tableSearch" class="search-bar" placeholder="🔍 Search medicine / batch..." oninput="filterTable()">
-            <select id="statusFilter" onchange="filterTable()">
-                <option value="">All status</option><option value="out">Out of stock</option><option value="low">Low stock</option><option value="exp">Expired / expiring</option>
+            <input type="search" name="q" value="<?php echo e($fq); ?>" class="search-bar" placeholder="🔍 Search medicine / batch...">
+            <select name="status" onchange="this.form.submit()">
+                <option value="">All status</option>
+                <option value="out" <?php echo $fstatus === 'out' ? 'selected' : ''; ?>>Out of stock</option>
+                <option value="low" <?php echo $fstatus === 'low' ? 'selected' : ''; ?>>Low stock</option>
+                <option value="exp" <?php echo $fstatus === 'exp' ? 'selected' : ''; ?>>Expired / expiring</option>
             </select>
-            <span class="muted" style="font-size:13px;" id="rowCount"></span>
-        </div>
+            <button class="btn btn-primary btn-sm">Search</button>
+            <?php if ($fq !== '' || $fstatus !== ''): ?><a class="btn btn-light btn-sm" href="inventory.php<?php echo $filter_admin ? '?admin=' . $filter_admin : ''; ?>">Reset</a><?php endif; ?>
+            <?php if (!$is_staff): ?>
+            <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+                <a class="btn btn-excel btn-sm" href="export.php?type=stock<?php echo $export_qs ? '&' . e($export_qs) : ''; ?>" title="Download this stock list (with the search/filter applied)">⬇ Excel (this list)</a>
+                <a class="btn btn-light btn-sm" href="export.php?type=all<?php echo $filter_admin ? '&admin=' . $filter_admin : ''; ?>" title="Stock + every invoice + items<?php echo $is_super ? ' + users' : ''; ?>">💾 Full backup</a>
+            </span>
+            <?php endif; ?>
+        </form>
         <table class="data rt" id="inventoryTable">
             <thead><tr>
                 <?php if ($is_super): ?><th>Admin</th><?php endif; ?>
                 <th>Product</th><th>Batch</th><th>Expiry</th><th>Rate</th><th>Stock</th><?php if (!$is_staff): ?><th>Value</th><?php endif; ?><th>Status</th><th style="text-align:right">Actions</th>
             </tr></thead>
             <tbody>
-            <?php foreach ($products as $p):
+            <?php foreach ($page_products as $p):
                 $q = (int)$p['stock_qty']; $ex = expiry_state($p['expiry']);
                 $flag = ($q <= 0 ? 'out ' : ($q <= LOW_STOCK_LIMIT ? 'low ' : '')) . (in_array($ex, ['expired', 'soon'], true) ? 'exp' : '');
                 $sv = $sold[(int)$p['id']] ?? null;
@@ -497,11 +518,12 @@ html{scroll-behavior:smooth}
                     </td>
                 </tr>
             <?php endforeach; ?>
-            <?php if (empty($products)): ?>
-                <tr><td colspan="10" class="no-label" style="text-align:center;color:#94a3b8;padding:30px;">No products found.</td></tr>
+            <?php if (empty($page_products)): ?>
+                <tr><td colspan="10" class="no-label" style="text-align:center;color:#94a3b8;padding:30px;"><?php echo ($fq !== '' || $fstatus !== '') ? 'No products match this search.' : 'No products found.'; ?></td></tr>
             <?php endif; ?>
             </tbody>
         </table>
+        <?php echo pager($total_rows, $page, $per); ?>
     </div>
 </div>
 
@@ -584,19 +606,6 @@ const IS_STAFF = <?php echo $is_staff ? 'true' : 'false'; ?>;
 const QS_ADMIN = <?php echo json_encode($qs_admin); ?>;
 const ADMINS = <?php echo json_encode((object)$admin_info, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const PRODS  = <?php echo json_encode($all_products_min, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
-
-/* ---------- table filter ---------- */
-function filterTable() {
-    const q = $('tableSearch').value.toLowerCase(), f = $('statusFilter').value;
-    let n = 0;
-    document.querySelectorAll('#inventoryTable tbody tr[data-flags]').forEach(tr => {
-        const ok = tr.textContent.toLowerCase().includes(q) && (!f || (tr.dataset.flags || '').split(' ').includes(f));
-        tr.style.display = ok ? '' : 'none';
-        if (ok) n++;
-    });
-    $('rowCount').textContent = n + ' shown';
-}
-filterTable();
 
 /* ---------- add-stock form (superadmin) ---------- */
 let matched = null;

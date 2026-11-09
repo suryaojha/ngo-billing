@@ -241,6 +241,7 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         <div class="page-header">
             <h1>Dashboard Overview</h1>
             <p>Welcome back, <?php echo htmlspecialchars($_SESSION['full_name']); ?></p>
+            <p style="margin-top:12px"><a class="btn" style="background:#107c41;color:#fff" href="export.php?type=all" title="Stock, every invoice, invoice items and the user list (no passwords) as one Excel file">💾 Download full backup (Excel)</a></p>
         </div>
         <div class="stats-grid">
             <div class="stat-card"><div class="label">Total Admins</div><div class="value" style="color:var(--primary);"><?php echo $total_admins; ?></div></div>

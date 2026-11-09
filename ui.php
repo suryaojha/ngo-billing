@@ -32,6 +32,82 @@ function expiry_state($exp): string {
     return 'ok';
 }
 
+/* ---------- stock list filter (shared by inventory.php and export.php) ---------- */
+function filter_products(array $products, string $q, string $status): array {
+    $q = strtolower(trim($q));
+    return array_values(array_filter($products, function ($p) use ($q, $status) {
+        if ($q !== '' && strpos(strtolower(($p['admin_name'] ?? '') . ' ' . $p['name'] . ' ' . $p['batch'] . ' ' . ($p['capacity'] ?? '')), $q) === false) return false;
+        $qty = (int)$p['stock_qty'];
+        if ($status === 'out' && $qty > 0) return false;
+        if ($status === 'low' && !($qty > 0 && $qty <= LOW_STOCK_LIMIT)) return false;
+        if ($status === 'exp' && !in_array(expiry_state($p['expiry']), ['expired', 'soon'], true)) return false;
+        return true;
+    }));
+}
+
+/* ---------- pagination ---------- */
+function page_params(int $defPer = 25): array {
+    $per = (int)($_GET['per'] ?? $defPer);
+    if (!in_array($per, [10, 25, 50, 100], true)) $per = $defPer;
+    $page = max(1, (int)($_GET['page'] ?? 1));
+    return [$page, $per];
+}
+
+// Page links that keep every other filter in the URL.
+function pager(int $total, int $page, int $per): string {
+    $pages = max(1, (int)ceil($total / $per));
+    $page  = min($page, $pages);
+    $url   = function (array $over) {
+        $q = array_merge($_GET, $over);
+        foreach ($q as $k => $v) if ($v === '' || $v === null) unset($q[$k]);
+        return '?' . http_build_query($q);
+    };
+    $from = $total ? ($page - 1) * $per + 1 : 0;
+    $to   = min($total, $page * $per);
+
+    $h  = '<div class="pager no-print"><div class="pager-info">Showing <b>' . $from . '–' . $to . '</b> of <b>' . number_format($total) . '</b></div>';
+    if ($pages > 1) {
+        $h .= '<div class="pager-links">';
+        $h .= $page > 1 ? '<a href="' . e($url(['page' => $page - 1])) . '">‹ Prev</a>' : '<span class="off">‹ Prev</span>';
+        $shown = [];
+        for ($p = 1; $p <= $pages; $p++) if ($p === 1 || $p === $pages || abs($p - $page) <= 2) $shown[] = $p;
+        $prev = 0;
+        foreach ($shown as $p) {
+            if ($p - $prev > 1) $h .= '<span class="dots">…</span>';
+            $h .= $p === $page ? '<span class="cur">' . $p . '</span>' : '<a href="' . e($url(['page' => $p])) . '">' . $p . '</a>';
+            $prev = $p;
+        }
+        $h .= $page < $pages ? '<a href="' . e($url(['page' => $page + 1])) . '">Next ›</a>' : '<span class="off">Next ›</span>';
+        $h .= '</div>';
+    }
+    $h .= '<label class="pager-per">Rows <select onchange="location.href=this.value">';
+    foreach ([10, 25, 50, 100] as $n) {
+        $h .= '<option value="' . e($url(['per' => $n, 'page' => 1])) . '"' . ($n === $per ? ' selected' : '') . '>' . $n . '</option>';
+    }
+    return $h . '</select></label></div>';
+}
+
+/* ---------- invoice list filters (shared by reports.php and export.php) ---------- */
+// Returns [' WHERE ...', [params]] for the invoices table aliased as "i".
+function invoice_where(string $role, ?int $listAdmin, array $g, bool $activeOnly = true): array {
+    $w = []; $p = [];
+    if ($activeOnly) $w[] = 'i.status=1';
+    if ($listAdmin) { $w[] = 'i.admin_id=?'; $p[] = $listAdmin; }
+    if ($role === 'staff') { $w[] = 'i.created_by=?'; $p[] = (int)($_SESSION['user_id'] ?? 0); }
+    // names/phones are stored in a latin1 column; plain ASCII search text avoids collation errors
+    $q = trim(preg_replace('/[^\x20-\x7E]/', '', (string)($g['q'] ?? '')));
+    if ($q !== '') {
+        $like = '%' . addcslashes($q, '%_\\') . '%';
+        $w[] = '(i.invoice_no LIKE ? OR i.customer_name LIKE ? OR i.customer_phone LIKE ?)';
+        array_push($p, $like, $like, $like);
+    }
+    foreach (['d1' => '>=', 'd2' => '<='] as $k => $op) {
+        $d = (string)($g[$k] ?? '');
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $d)) { $w[] = "DATE(i.created_at) $op ?"; $p[] = $d; }
+    }
+    return [$w ? ' WHERE ' . implode(' AND ', $w) : '', $p];
+}
+
 /* ---------- navigation bar ---------- */
 function ui_nav(string $active): string {
     $role = $_SESSION['role'] ?? '';
@@ -100,6 +176,13 @@ table.data tr:hover td{background:#f8fafc}
 .alert-error,.alert-danger{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
 .alert-info{background:#dbeafe;color:#1e40af;border:1px solid #93c5fd}
 .search-bar{width:100%;max-width:320px}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:16px;font-size:13px;color:var(--muted)}
+.pager-links{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.pager-links a,.pager-links .cur,.pager-links .off,.pager-links .dots{min-width:36px;height:36px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px}
+.pager-links a{background:#fff;border:1px solid var(--line);color:#0f172a}.pager-links a:hover{border-color:var(--primary);color:var(--primary)}
+.pager-links .cur{background:var(--primary);color:#fff}.pager-links .off{color:#cbd5e1;border:1px solid #f1f5f9}.pager-links .dots{color:var(--muted)}
+.pager-per select{padding:6px 10px;font-size:13px}
+.btn-excel{background:#107c41;color:#fff}.btn-excel:hover{background:#0b5e31}
 .modal-bg{position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:5000;display:none;align-items:center;justify-content:center;padding:14px}
 .modal-bg.open{display:flex}
 .modal{background:#fff;border-radius:16px;width:100%;max-width:560px;max-height:92vh;overflow:auto;padding:22px}
