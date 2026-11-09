@@ -15,12 +15,16 @@ if (isset($_POST['create_admin'])) {
     $uname = trim($_POST['username']);
     $fname = trim($_POST['full_name']);
     $pass  = $_POST['password'];
-    $role  = $_POST['role']; // admin or staff
-    $aid   = ($role === 'staff') ? (int)$_POST['admin_id'] : null;
+    $role  = $_POST['role'] ?? ''; // admin or staff
+    $aid   = ($role === 'staff') ? (int)($_POST['admin_id'] ?? 0) : null;
 
     $check = $pdo->prepare("SELECT id FROM users WHERE username=?");
     $check->execute([$uname]);
-    if ($check->fetch()) {
+    if (!in_array($role, ['admin', 'staff'], true) || $uname === '' || $fname === '' || $pass === '') {
+        $msg = '<div class="alert alert-danger">Please fill in name, username, password and a valid role.</div>';
+    } elseif ($role === 'staff' && !$aid) {
+        $msg = '<div class="alert alert-danger">A staff member must be assigned to an admin, otherwise they cannot bill.</div>';
+    } elseif ($check->fetch()) {
         $msg = '<div class="alert alert-danger">Username already exists.</div>';
     } else {
         $pdo->prepare("INSERT INTO users (username,full_name,password,role,admin_id,company_name,company_address,gstin,company_phone) VALUES (?,?,?,?,?,?,?,?,?)")
@@ -52,6 +56,13 @@ if (isset($_GET['toggle'])) {
 // ── DELETE USER ───────────────────────────────────────────────
 if (isset($_GET['del_user'])) {
     $uid = (int)$_GET['del_user'];
+    // Never delete an admin who still owns staff, stock or invoices — that would orphan them. Disable instead.
+    $dep = $pdo->prepare("SELECT (SELECT COUNT(*) FROM users WHERE admin_id=?) + (SELECT COUNT(*) FROM products WHERE admin_id=?) + (SELECT COUNT(*) FROM invoices WHERE admin_id=?)");
+    $dep->execute([$uid, $uid, $uid]);
+    if ((int)$dep->fetchColumn() > 0) {
+        header("Location: superadmin.php?tab=users&blocked=1");
+        exit;
+    }
     $pdo->prepare("DELETE FROM users WHERE id=? AND role != 'superadmin'")->execute([$uid]);
     header("Location: superadmin.php?tab=users");
     exit;
@@ -77,8 +88,23 @@ $total_products= $pdo->query("SELECT COUNT(*) FROM products")->fetchColumn();
 $total_invoices= $pdo->query("SELECT COUNT(*) FROM invoices WHERE status=1")->fetchColumn();
 $total_revenue = $pdo->query("SELECT IFNULL(SUM(total_amount),0) FROM invoices WHERE status=1")->fetchColumn();
 
+$low_stock_count = $pdo->query("SELECT COUNT(*) FROM products WHERE stock_qty <= 10")->fetchColumn();
+$stock_value     = $pdo->query("SELECT IFNULL(SUM(GREATEST(stock_qty,0)*rate),0) FROM products")->fetchColumn();
+
+// One query for every admin's staff / product / stock numbers (instead of 2 queries per admin)
+$admin_stats = [];
+foreach ($pdo->query("
+    SELECT u.id,
+           (SELECT COUNT(*) FROM users s WHERE s.admin_id=u.id AND s.role='staff') AS staff_count,
+           (SELECT COUNT(*) FROM products p WHERE p.admin_id=u.id) AS prod_count,
+           (SELECT IFNULL(SUM(GREATEST(p.stock_qty,0)),0) FROM products p WHERE p.admin_id=u.id) AS units,
+           (SELECT IFNULL(SUM(GREATEST(p.stock_qty,0)*p.rate),0) FROM products p WHERE p.admin_id=u.id) AS val
+    FROM users u WHERE u.role='admin'")->fetchAll() as $r) {
+    $admin_stats[(int)$r['id']] = $r;
+}
+
 // All invoices
-$all_invoices = $pdo->query("SELECT i.*, u.full_name as staff_name FROM invoices i LEFT JOIN users u ON i.created_by=u.id WHERE i.status=1 ORDER BY i.created_at DESC LIMIT 100")->fetchAll();
+$all_invoices = $pdo->query("SELECT i.*, u.full_name as staff_name, a.full_name as admin_name FROM invoices i LEFT JOIN users u ON i.created_by=u.id LEFT JOIN users a ON i.admin_id=a.id WHERE i.status=1 ORDER BY i.created_at DESC LIMIT 100")->fetchAll();
 
 // All products with admin name
 $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products p LEFT JOIN users u ON p.admin_id=u.id ORDER BY p.admin_id, p.id DESC")->fetchAll();
@@ -160,12 +186,24 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         .tab-content.active { display:block; }
 
         @media(max-width:768px){
-            .sidebar{width:100%;height:auto;position:relative;flex-direction:row;flex-wrap:wrap;}
+            body{flex-direction:column;}
+            .sidebar{width:100%;height:auto;position:relative;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between;}
+            .sidebar-brand{padding:12px 16px;border-bottom:none;}
+            .sidebar-footer{padding:8px 12px;border-top:none;}
+            .main{width:100%;}
             .sidebar-nav{display:flex;flex-wrap:wrap;padding:8px;}
             .nav-item{padding:8px 12px;font-size:12px;}
             .main{margin-left:0;padding:15px;}
             .stats-grid{grid-template-columns:1fr 1fr;}
-            table{display:block;overflow-x:auto;}
+            .stat-card .value{font-size:22px;}
+            .card{padding:16px;}
+            .form-grid input,.form-grid select{font-size:16px;}
+            table.rt,table.rt tbody,table.rt tr,table.rt td{display:block;width:100%;}
+            table.rt thead{display:none;}
+            table.rt tr{border:1px solid #e2e8f0;border-radius:12px;margin-bottom:10px;padding:8px 12px;background:#fff;}
+            table.rt td{border:none;padding:6px 0;display:flex;justify-content:space-between;align-items:center;gap:12px;text-align:right;}
+            table.rt td::before{content:attr(data-label);font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;text-align:left;flex-shrink:0;}
+            tr:hover td{background:transparent;}
         }
     </style>
 </head>
@@ -181,8 +219,9 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         <a href="?tab=dashboard" class="nav-item <?php echo $tab==='dashboard'?'active':''; ?>"><span>🏠</span> Dashboard</a>
         <a href="?tab=users" class="nav-item <?php echo $tab==='users'?'active':''; ?>"><span>👥</span> Manage Users</a>
         <a href="?tab=create" class="nav-item <?php echo $tab==='create'?'active':''; ?>"><span>➕</span> Create User</a>
-        <a href="inventory.php" class="nav-item"><span>📦</span> Manage Stock</a>
-        <a href="?tab=invoices" class="nav-item <?php echo $tab==='invoices'?'active':''; ?>"><span>🧾</span> All Invoices</a>
+        <a href="inventory.php" class="nav-item"><span>📦</span> All Stock</a>
+        <a href="billing.php" class="nav-item"><span>🧾</span> Create Bill</a>
+        <a href="?tab=invoices" class="nav-item <?php echo $tab==='invoices'?'active':''; ?>"><span>📚</span> All Invoices</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="logout-btn">🚪 Logout</a>
@@ -194,6 +233,7 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
 
     <?php echo $msg; ?>
     <?php if(isset($_GET['saved'])): ?><div class="alert alert-success">✅ Company profile saved.</div><?php endif; ?>
+    <?php if(isset($_GET['blocked'])): ?><div class="alert alert-danger">This admin still has staff, stock or invoices, so it can't be deleted. Use <strong>Disable</strong> instead.</div><?php endif; ?>
 
     <!-- DASHBOARD TAB -->
     <div class="tab-content <?php echo $tab==='dashboard'?'active':''; ?>">
@@ -207,29 +247,34 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
             <div class="stat-card"><div class="label">Total Products</div><div class="value" style="color:var(--warning);"><?php echo $total_products; ?></div></div>
             <div class="stat-card"><div class="label">Total Invoices</div><div class="value" style="color:var(--success);"><?php echo $total_invoices; ?></div></div>
             <div class="stat-card"><div class="label">Total Revenue</div><div class="value" style="color:var(--success);">₹<?php echo number_format($total_revenue,0); ?></div></div>
+            <div class="stat-card"><div class="label">Stock Value</div><div class="value" style="color:#0891b2;">₹<?php echo number_format($stock_value,0); ?></div></div>
+            <div class="stat-card"><div class="label">Low / Out of Stock</div><div class="value" style="color:var(--danger);"><?php echo $low_stock_count; ?></div></div>
         </div>
 
-        <!-- Quick: Admins & their staff -->
+        <!-- Quick: Admins, their staff and stock -->
         <div class="card">
-            <div class="card-title">👥 Admins & Their Staff</div>
-            <table>
-                <thead><tr><th>Admin</th><th>Company / GSTIN</th><th>Staff Count</th><th>Products</th></tr></thead>
+            <div class="card-title">👥 Admins, Staff &amp; Stock</div>
+            <table class="rt">
+                <thead><tr><th>Admin</th><th>Company / GSTIN</th><th>Staff</th><th>Products</th><th>Units</th><th>Stock value</th><th>Actions</th></tr></thead>
                 <tbody>
                     <?php foreach($admins as $a):
-                        $sc = $pdo->prepare("SELECT COUNT(*) FROM users WHERE admin_id=? AND role='staff'");
-                        $sc->execute([$a['id']]); $staff_count = $sc->fetchColumn();
-                        $pc = $pdo->prepare("SELECT COUNT(*) FROM products WHERE admin_id=?");
-                        $pc->execute([$a['id']]); $prod_count = $pc->fetchColumn();
+                        $s = $admin_stats[(int)$a['id']] ?? ['staff_count'=>0,'prod_count'=>0,'units'=>0,'val'=>0];
                     ?>
                     <tr>
-                        <td><strong><?php echo htmlspecialchars($a['full_name']); ?></strong><br><small style="color:#64748b;">@<?php echo htmlspecialchars($a['username']); ?></small></td>
-                        <td><?php echo htmlspecialchars($a['company_name'] ?? '') ?: '<span style="color:#94a3b8;">Not set</span>'; ?><?php if(!empty($a['gstin'])): ?><br><small style="color:#64748b;"><?php echo htmlspecialchars($a['gstin']); ?></small><?php endif; ?></td>
-                        <td><span class="badge badge-staff"><?php echo $staff_count; ?> staff</span></td>
-                        <td><span class="badge badge-admin"><?php echo $prod_count; ?> products</span></td>
+                        <td data-label="Admin"><div><strong><?php echo htmlspecialchars($a['full_name']); ?></strong><br><small style="color:#64748b;">@<?php echo htmlspecialchars($a['username']); ?></small></div></td>
+                        <td data-label="Company"><div><?php echo htmlspecialchars($a['company_name'] ?? '') ?: '<span style="color:#94a3b8;">Not set</span>'; ?><?php if(!empty($a['gstin'])): ?><br><small style="color:#64748b;"><?php echo htmlspecialchars($a['gstin']); ?></small><?php endif; ?></div></td>
+                        <td data-label="Staff"><span class="badge badge-staff"><?php echo (int)$s['staff_count']; ?> staff</span></td>
+                        <td data-label="Products"><span class="badge badge-admin"><?php echo (int)$s['prod_count']; ?></span></td>
+                        <td data-label="Units"><?php echo number_format((int)$s['units']); ?></td>
+                        <td data-label="Stock value">₹<?php echo number_format((float)$s['val'],0); ?></td>
+                        <td data-label="Actions">
+                            <a href="inventory.php?admin=<?php echo (int)$a['id']; ?>" class="btn" style="background:#e0e7ff;color:#3730a3;font-size:12px;padding:6px 12px;">📦 Stock</a>
+                            <a href="billing.php?for=<?php echo (int)$a['id']; ?>" class="btn btn-primary" style="font-size:12px;padding:6px 12px;">🧾 Create bill</a>
+                        </td>
                     </tr>
                     <?php endforeach; ?>
                     <?php if(empty($admins)): ?>
-                        <tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:30px;">No admins yet. <a href="?tab=create">Create one</a></td></tr>
+                        <tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:30px;">No admins yet. <a href="?tab=create">Create one</a></td></tr>
                     <?php endif; ?>
                 </tbody>
             </table>
@@ -238,16 +283,17 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         <!-- Recent Invoices -->
         <div class="card">
             <div class="card-title">🧾 Recent Invoices</div>
-            <table>
-                <thead><tr><th>Invoice No</th><th>Customer</th><th>Amount</th><th>By</th><th>Date</th></tr></thead>
+            <table class="rt">
+                <thead><tr><th>Invoice No</th><th>Admin</th><th>Customer</th><th>Amount</th><th>By</th><th>Date</th></tr></thead>
                 <tbody>
                     <?php foreach(array_slice($all_invoices,0,10) as $inv): ?>
                     <tr>
-                        <td><strong>#<?php echo $inv['invoice_no']; ?></strong></td>
-                        <td><?php echo htmlspecialchars($inv['customer_name']); ?></td>
-                        <td><strong>₹<?php echo number_format($inv['total_amount'],2); ?></strong></td>
-                        <td><?php echo htmlspecialchars($inv['staff_name'] ?? 'N/A'); ?></td>
-                        <td><?php echo date('d-M-Y',strtotime($inv['created_at'])); ?></td>
+                        <td data-label="Invoice"><strong>#<?php echo htmlspecialchars($inv['invoice_no']); ?></strong></td>
+                        <td data-label="Admin"><?php echo htmlspecialchars($inv['admin_name'] ?? '—'); ?></td>
+                        <td data-label="Customer"><?php echo htmlspecialchars($inv['customer_name']); ?></td>
+                        <td data-label="Amount"><strong>₹<?php echo number_format($inv['total_amount'],2); ?></strong></td>
+                        <td data-label="By"><?php echo htmlspecialchars($inv['staff_name'] ?? 'N/A'); ?></td>
+                        <td data-label="Date"><?php echo date('d-M-Y',strtotime($inv['created_at'])); ?></td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -263,23 +309,23 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         </div>
         <div class="card">
             <div class="card-title">All Users <a href="?tab=create" class="btn btn-primary" style="float:right;font-size:13px;">+ Create User</a></div>
-            <table>
+            <table class="rt">
                 <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Belongs To</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
                     <?php foreach($all_users as $u): ?>
                     <tr>
-                        <td><strong><?php echo htmlspecialchars($u['full_name']); ?></strong></td>
-                        <td>@<?php echo htmlspecialchars($u['username']); ?></td>
-                        <td><span class="badge badge-<?php echo $u['role']; ?>"><?php echo ucfirst($u['role']); ?></span></td>
-                        <td><?php echo $u['role']==='staff' ? htmlspecialchars($u['admin_name']??'—') : '—'; ?></td>
-                        <td>
+                        <td data-label="Name"><strong><?php echo htmlspecialchars($u['full_name']); ?></strong></td>
+                        <td data-label="Username">@<?php echo htmlspecialchars($u['username']); ?></td>
+                        <td data-label="Role"><span class="badge badge-<?php echo $u['role']; ?>"><?php echo ucfirst($u['role']); ?></span></td>
+                        <td data-label="Belongs to"><?php echo $u['role']==='staff' ? htmlspecialchars($u['admin_name']??'—') : '—'; ?></td>
+                        <td data-label="Status">
                             <?php if($u['IsActive']): ?>
                                 <span class="badge badge-staff">Active</span>
                             <?php else: ?>
                                 <span class="badge badge-inactive">Inactive</span>
                             <?php endif; ?>
                         </td>
-                        <td>
+                        <td data-label="Actions">
                             <?php if($u['role']==='admin'): ?>
                                 <a href="?tab=users&edit_company=<?php echo $u['id']; ?>" class="btn" style="background:#e0e7ff;color:#3730a3;font-size:12px;padding:6px 12px;">Company Profile</a>
                             <?php endif; ?>
@@ -377,22 +423,23 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         </div>
         <div class="card">
             <div class="card-title">Invoice Records</div>
-            <table>
-                <thead><tr><th>Invoice No</th><th>Customer</th><th>Phone</th><th>Amount</th><th>Created By</th><th>Date</th><th>Action</th></tr></thead>
+            <table class="rt">
+                <thead><tr><th>Invoice No</th><th>Admin</th><th>Customer</th><th>Phone</th><th>Amount</th><th>Created By</th><th>Date</th><th>Action</th></tr></thead>
                 <tbody>
                     <?php foreach($all_invoices as $inv): ?>
                     <tr>
-                        <td><strong>#<?php echo $inv['invoice_no']; ?></strong></td>
-                        <td><?php echo htmlspecialchars($inv['customer_name']); ?></td>
-                        <td><?php echo htmlspecialchars($inv['customer_phone']); ?></td>
-                        <td><strong>₹<?php echo number_format($inv['total_amount'],2); ?></strong></td>
-                        <td><?php echo htmlspecialchars($inv['staff_name'] ?? 'N/A'); ?></td>
-                        <td><?php echo date('d-M-Y H:i',strtotime($inv['created_at'])); ?></td>
-                        <td><a href="reports.php?view=<?php echo $inv['id']; ?>" class="btn btn-primary" style="font-size:12px;padding:6px 12px;">View</a></td>
+                        <td data-label="Invoice"><strong>#<?php echo htmlspecialchars($inv['invoice_no']); ?></strong></td>
+                        <td data-label="Admin"><?php echo htmlspecialchars($inv['admin_name'] ?? '—'); ?></td>
+                        <td data-label="Customer"><?php echo htmlspecialchars($inv['customer_name']); ?></td>
+                        <td data-label="Phone"><?php echo htmlspecialchars($inv['customer_phone']); ?></td>
+                        <td data-label="Amount"><strong>₹<?php echo number_format($inv['total_amount'],2); ?></strong></td>
+                        <td data-label="Created by"><?php echo htmlspecialchars($inv['staff_name'] ?? 'N/A'); ?></td>
+                        <td data-label="Date"><?php echo date('d-M-Y H:i',strtotime($inv['created_at'])); ?></td>
+                        <td data-label="Action"><a href="reports.php?view=<?php echo (int)$inv['id']; ?>" class="btn btn-primary" style="font-size:12px;padding:6px 12px;">View</a></td>
                     </tr>
                     <?php endforeach; ?>
                     <?php if(empty($all_invoices)): ?>
-                        <tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:30px;">No invoices found.</td></tr>
+                        <tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:30px;">No invoices found.</td></tr>
                     <?php endif; ?>
                 </tbody>
             </table>

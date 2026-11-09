@@ -1,383 +1,700 @@
 <?php
 session_start();
 require 'config.php';
+require 'ui.php';
 
-if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role'], ['admin','superadmin'])) {
+if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role'], ['admin', 'superadmin'], true)) {
     header("Location: login.php");
     exit;
 }
 
 $role     = $_SESSION['role'];
-$admin_id = ($role === 'admin') ? $_SESSION['user_id'] : null;
+$is_super = ($role === 'superadmin');
+$admin_id = $is_super ? null : (int)$_SESSION['user_id'];
 
-// ADD PRODUCT — superadmin only
-if ($role === 'superadmin' && isset($_POST['add_product'])) {
-    $target_admin = (int)$_POST['target_admin_id'];
-    $name  = trim($_POST['name']);
-    $batch = trim($_POST['batch']);
-    $addQty = (int)$_POST['stock_qty'];
-
-    // Same product+batch already exists for this admin? Add to its stock
-    // instead of creating a duplicate row.
-    $existing = $pdo->prepare("SELECT id, stock_qty FROM products WHERE admin_id=? AND name=? AND batch=?");
-    $existing->execute([$target_admin, $name, $batch]);
-    $existingRow = $existing->fetch();
-
-    if ($existingRow) {
-        $pdo->prepare("UPDATE products SET stock_qty = stock_qty + ?, expiry=?, capacity=?, rate=?, gst_percent=? WHERE id=?")
-            ->execute([$addQty, $_POST['expiry'], $_POST['capacity'], $_POST['rate'], $_POST['gst_percent'], $existingRow['id']]);
-        header("Location: inventory.php?merged=1");
-    } else {
-        $pdo->prepare("INSERT INTO products (name,batch,expiry,capacity,rate,stock_qty,gst_percent,admin_id) VALUES (?,?,?,?,?,?,?,?)")
-            ->execute([$name,$batch,$_POST['expiry'],$_POST['capacity'],$_POST['rate'],$addQty,$_POST['gst_percent'],$target_admin]);
-        header("Location: inventory.php?success=1");
-    }
-    exit;
+// Active admins (businesses) — used by the superadmin forms/filters.
+$admins = [];
+if ($is_super) {
+    $admins = $pdo->query("SELECT id, username, full_name, company_name, gstin, company_phone FROM users WHERE role='admin' AND IsActive=1 ORDER BY full_name")->fetchAll();
 }
+$admin_ids = array_map('intval', array_column($admins, 'id'));
+$admin_names = [];
+foreach ($admins as $a) { $admin_names[(int)$a['id']] = $a['full_name'] . ($a['company_name'] ? ' (' . $a['company_name'] . ')' : ''); }
 
-// MERGE two products (fold source's stock into target, remove source) — superadmin only
-if ($role === 'superadmin' && isset($_POST['merge_products'])) {
-    $keepId = (int)$_POST['keep_id'];
-    $mergeId = (int)$_POST['merge_id'];
-    if ($keepId && $mergeId && $keepId !== $mergeId) {
-        $pdo->beginTransaction();
-        try {
-            $keep = $pdo->prepare("SELECT * FROM products WHERE id=?"); $keep->execute([$keepId]); $keep = $keep->fetch();
-            $merge = $pdo->prepare("SELECT * FROM products WHERE id=?"); $merge->execute([$mergeId]); $merge = $merge->fetch();
-            if ($keep && $merge && $keep['admin_id'] == $merge['admin_id']) {
-                $pdo->prepare("UPDATE products SET stock_qty = stock_qty + ? WHERE id=?")->execute([$merge['stock_qty'], $keepId]);
-                $pdo->prepare("DELETE FROM products WHERE id=?")->execute([$mergeId]);
+/* ------------------------------------------------------------------
+ * Superadmin actions (all POST). Stock is validated so it can never be negative.
+ * ------------------------------------------------------------------ */
+if ($is_super && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $back = 'inventory.php' . (!empty($_POST['back_admin']) ? '?admin=' . (int)$_POST['back_admin'] : '');
+
+    // ADD PRODUCT (or top-up stock if the same product+batch already exists for that admin)
+    if (isset($_POST['add_product'])) {
+        $target = (int)($_POST['target_admin_id'] ?? 0);
+        $name   = trim((string)($_POST['name'] ?? ''));
+        $batch  = trim((string)($_POST['batch'] ?? ''));
+        $qty    = $_POST['stock_qty'] ?? '';
+        $rate   = $_POST['rate'] ?? '';
+        $gst    = $_POST['gst_percent'] ?? 5;
+
+        if (!in_array($target, $admin_ids, true))                    flash_set('error', 'Choose a valid admin to assign this stock to.');
+        elseif ($name === '' || $batch === '')                       flash_set('error', 'Medicine name and batch are required.');
+        elseif (!is_numeric($qty) || (int)$qty != $qty || $qty < 0)  flash_set('error', 'Stock quantity must be a whole number, 0 or more.');
+        elseif (!is_numeric($rate) || $rate < 0)                     flash_set('error', 'Rate cannot be negative.');
+        elseif (!is_numeric($gst) || $gst < 0 || $gst > 100)         flash_set('error', 'GST % must be between 0 and 100.');
+        else {
+            $qty = (int)$qty;
+            $ex = $pdo->prepare("SELECT id FROM products WHERE admin_id=? AND name=? AND batch=?");
+            $ex->execute([$target, $name, $batch]);
+            if ($row = $ex->fetch()) {
+                $pdo->prepare("UPDATE products SET stock_qty = stock_qty + ?, expiry=?, capacity=?, rate=?, gst_percent=? WHERE id=?")
+                    ->execute([$qty, $_POST['expiry'] ?? '', $_POST['capacity'] ?? '', $rate, $gst, $row['id']]);
+                flash_set('success', "Added $qty units to the existing stock of \"$name\" (batch $batch) for {$admin_names[$target]}.");
+            } else {
+                $pdo->prepare("INSERT INTO products (name,batch,expiry,capacity,rate,stock_qty,gst_percent,admin_id) VALUES (?,?,?,?,?,?,?,?)")
+                    ->execute([$name, $batch, $_POST['expiry'] ?? '', $_POST['capacity'] ?? '', $rate, $qty, $gst, $target]);
+                flash_set('success', "\"$name\" (batch $batch) — $qty units assigned to {$admin_names[$target]}.");
             }
-            $pdo->commit();
-        } catch (Exception $e) {
-            $pdo->rollBack();
         }
+        header("Location: $back"); exit;
     }
-    header("Location: inventory.php?merged=1");
-    exit;
-}
 
-// DELETE PRODUCT — superadmin only
-if ($role === 'superadmin' && isset($_GET['delete'])) {
-    $pdo->prepare("DELETE FROM products WHERE id=?")->execute([$_GET['delete']]);
-    header("Location: inventory.php?deleted=1");
-    exit;
-}
+    // EDIT PRODUCT (rate / expiry / capacity / GST / stock)
+    if (isset($_POST['edit_product'])) {
+        $pid  = (int)($_POST['id'] ?? 0);
+        $qty  = $_POST['stock_qty'] ?? '';
+        $rate = $_POST['rate'] ?? '';
+        $gst  = $_POST['gst_percent'] ?? 5;
+        if ($pid <= 0)                                               flash_set('error', 'Product not found.');
+        elseif (!is_numeric($qty) || (int)$qty != $qty || $qty < 0)  flash_set('error', 'Stock cannot be negative and must be a whole number.');
+        elseif (!is_numeric($rate) || $rate < 0)                     flash_set('error', 'Rate cannot be negative.');
+        elseif (!is_numeric($gst) || $gst < 0 || $gst > 100)         flash_set('error', 'GST % must be between 0 and 100.');
+        else {
+            $pdo->prepare("UPDATE products SET rate=?, expiry=?, capacity=?, gst_percent=?, stock_qty=? WHERE id=?")
+                ->execute([$rate, trim((string)($_POST['expiry'] ?? '')), trim((string)($_POST['capacity'] ?? '')), $gst, (int)$qty, $pid]);
+            flash_set('success', 'Product updated.');
+        }
+        header("Location: $back"); exit;
+    }
 
-// VIEW DISTRIBUTION HISTORY
-$view_history = null;
-$distribution_data = [];
-if (isset($_GET['view_history'])) {
-    $pid = (int)$_GET['view_history'];
-    $q = ($role === 'admin')
-        ? $pdo->prepare("SELECT * FROM products WHERE id=? AND admin_id=?")
-        : $pdo->prepare("SELECT * FROM products WHERE id=?");
-    $role === 'admin' ? $q->execute([$pid, $admin_id]) : $q->execute([$pid]);
-    $view_history = $q->fetch();
-    if ($view_history) {
-        $stmt = $pdo->prepare("SELECT ii.qty,ii.created_at,i.invoice_no,i.customer_name FROM invoice_items ii JOIN invoices i ON ii.invoice_id=i.id WHERE ii.product_name=? AND ii.batch=? AND i.status=1 ORDER BY ii.created_at DESC");
-        $stmt->execute([$view_history['name'],$view_history['batch']]);
-        $distribution_data = $stmt->fetchAll();
+    // MERGE two duplicate products (stock of one is folded into the other)
+    if (isset($_POST['merge_products'])) {
+        $keepId  = (int)($_POST['keep_id'] ?? 0);
+        $mergeId = (int)($_POST['merge_id'] ?? 0);
+        if ($keepId && $mergeId && $keepId !== $mergeId) {
+            $pdo->beginTransaction();
+            try {
+                $k = $pdo->prepare("SELECT * FROM products WHERE id=? FOR UPDATE"); $k->execute([$keepId]);  $keep  = $k->fetch();
+                $m = $pdo->prepare("SELECT * FROM products WHERE id=? FOR UPDATE"); $m->execute([$mergeId]); $merge = $m->fetch();
+                if ($keep && $merge && $keep['admin_id'] == $merge['admin_id']) {
+                    $pdo->prepare("UPDATE products SET stock_qty = stock_qty + ? WHERE id=?")->execute([max(0, (int)$merge['stock_qty']), $keepId]);
+                    // keep sales history pointing at the surviving product
+                    $pdo->prepare("UPDATE invoice_items SET product_id=? WHERE product_id=?")->execute([$keepId, $mergeId]);
+                    $pdo->prepare("DELETE FROM products WHERE id=?")->execute([$mergeId]);
+                    flash_set('success', 'Stock merged into the existing product.');
+                } else {
+                    flash_set('error', 'Those two products cannot be merged.');
+                }
+                $pdo->commit();
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                flash_set('error', 'Merge failed.');
+            }
+        }
+        header("Location: $back"); exit;
+    }
+
+    // DELETE PRODUCT
+    if (isset($_POST['delete_product'])) {
+        $pid = (int)($_POST['id'] ?? 0);
+        if ($pid > 0) {
+            $pdo->prepare("DELETE FROM products WHERE id=?")->execute([$pid]);
+            flash_set('success', 'Product deleted.');
+        }
+        header("Location: $back"); exit;
     }
 }
 
-// FETCH PRODUCTS
-if ($role === 'admin') {
-    $products = $pdo->prepare("SELECT * FROM products WHERE admin_id=? ORDER BY id DESC");
-    $products->execute([$admin_id]);
-    $products = $products->fetchAll();
+/* ------------------------------------------------------------------
+ * Data for the page
+ * ------------------------------------------------------------------ */
+$filter_admin = 0;
+if ($is_super && isset($_GET['admin']) && in_array((int)$_GET['admin'], $admin_ids, true)) {
+    $filter_admin = (int)$_GET['admin'];
+}
+
+$filter_name = '';
+foreach ($admins as $a) { if ((int)$a['id'] === $filter_admin) $filter_name = $a['full_name']; }
+
+if ($is_super) {
+    if ($filter_admin) {
+        $st = $pdo->prepare("SELECT p.*, u.full_name AS admin_name FROM products p LEFT JOIN users u ON p.admin_id=u.id WHERE p.admin_id=? ORDER BY p.name, p.expiry");
+        $st->execute([$filter_admin]);
+    } else {
+        $st = $pdo->query("SELECT p.*, u.full_name AS admin_name FROM products p LEFT JOIN users u ON p.admin_id=u.id ORDER BY u.full_name, p.name, p.expiry");
+    }
 } else {
-    // superadmin sees all, grouped by admin
-    $products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products p LEFT JOIN users u ON p.admin_id=u.id ORDER BY p.admin_id, p.id DESC")->fetchAll();
+    $st = $pdo->prepare("SELECT p.* FROM products p WHERE p.admin_id=? ORDER BY p.name, p.expiry");
+    $st->execute([$admin_id]);
+}
+$products = $st->fetchAll();
+
+$total_items = count($products); $low_stock = 0; $out_stock = 0; $total_value = 0; $total_units = 0; $exp_count = 0;
+foreach ($products as $p) {
+    $q = (int)$p['stock_qty'];
+    $total_units += max(0, $q);
+    $total_value += max(0, $q) * (float)$p['rate'];
+    if ($q <= 0) $out_stock++; elseif ($q <= LOW_STOCK_LIMIT) $low_stock++;
+    if (in_array(expiry_state($p['expiry']), ['expired', 'soon'], true)) $exp_count++;
 }
 
-// Stats
-$total_items = count($products);
-$low_stock = 0; $total_value = 0;
-foreach($products as $p) {
-    if($p['stock_qty'] < 10) $low_stock++;
-    $total_value += ($p['rate'] * $p['stock_qty']);
+// Per-admin overview (superadmin): cards in the "all admins" view + live info panel in the add-stock form
+$overview = [];
+if ($is_super) {
+    $overview = $pdo->query("
+        SELECT u.id, u.full_name, u.company_name,
+               COUNT(p.id) AS prod_count,
+               COALESCE(SUM(GREATEST(p.stock_qty,0)),0) AS units,
+               COALESCE(SUM(GREATEST(p.stock_qty,0)*p.rate),0) AS val,
+               COALESCE(SUM(p.stock_qty <= " . LOW_STOCK_LIMIT . "),0) AS low
+        FROM users u LEFT JOIN products p ON p.admin_id=u.id
+        WHERE u.role='admin' AND u.IsActive=1
+        GROUP BY u.id, u.full_name, u.company_name ORDER BY u.full_name")->fetchAll();
 }
 
-// POSSIBLE DUPLICATES — same admin + same name/batch once case & spacing
-// are ignored, but not byte-identical (so not already merged automatically).
-// Superadmin reviews these and merges manually so two genuinely different
-// products never get combined by mistake.
+// Info about each admin for the "assign to" panel, and light product list for the live duplicate check
+$admin_info = []; $all_products_min = [];
+if ($is_super) {
+    $ov = [];
+    foreach ($overview as $o) $ov[(int)$o['id']] = $o;
+    foreach ($admins as $a) {
+        $o = $ov[(int)$a['id']] ?? [];
+        $admin_info[(int)$a['id']] = [
+            'name' => $a['full_name'], 'username' => $a['username'], 'company' => $a['company_name'] ?: '',
+            'gstin' => $a['gstin'] ?: '', 'phone' => $a['company_phone'] ?: '',
+            'products' => (int)($o['prod_count'] ?? 0), 'units' => (int)($o['units'] ?? 0),
+            'value' => (float)($o['val'] ?? 0), 'low' => (int)($o['low'] ?? 0),
+        ];
+    }
+    $all_products_min = $pdo->query("SELECT admin_id, name, batch, expiry, capacity, rate, gst_percent, stock_qty FROM products")->fetchAll();
+}
+
+// Units sold + last sale date per product (for the details view)
+$sold = [];
+$sst = $pdo->prepare("SELECT ii.product_id, SUM(ii.qty) AS sold, MAX(ii.created_at) AS last_sold
+                      FROM invoice_items ii JOIN invoices i ON i.id=ii.invoice_id
+                      WHERE i.status=1 AND ii.product_id IS NOT NULL" . ($is_super ? "" : " AND i.admin_id=?") . "
+                      GROUP BY ii.product_id");
+$sst->execute($is_super ? [] : [$admin_id]);
+foreach ($sst->fetchAll() as $r) $sold[(int)$r['product_id']] = $r;
+
+// Possible duplicates (superadmin)
 $possible_duplicates = [];
-if ($role === 'superadmin') {
+if ($is_super) {
     $dupRows = $pdo->query("
         SELECT admin_id, LOWER(TRIM(name)) AS norm_name, LOWER(TRIM(batch)) AS norm_batch, COUNT(*) AS cnt
-        FROM products
-        GROUP BY admin_id, norm_name, norm_batch
-        HAVING COUNT(*) > 1
-    ")->fetchAll();
+        FROM products GROUP BY admin_id, norm_name, norm_batch HAVING COUNT(*) > 1")->fetchAll();
     foreach ($dupRows as $d) {
-        $grp = $pdo->prepare("SELECT p.*, u.full_name AS admin_name FROM products p LEFT JOIN users u ON p.admin_id=u.id WHERE p.admin_id <=> ? AND LOWER(TRIM(p.name))=? AND LOWER(TRIM(p.batch))=? ORDER BY p.id");
-        $grp->execute([$d['admin_id'], $d['norm_name'], $d['norm_batch']]);
-        $possible_duplicates[] = $grp->fetchAll();
+        $g = $pdo->prepare("SELECT p.*, u.full_name AS admin_name FROM products p LEFT JOIN users u ON p.admin_id=u.id WHERE p.admin_id <=> ? AND LOWER(TRIM(p.name))=? AND LOWER(TRIM(p.batch))=? ORDER BY p.id");
+        $g->execute([$d['admin_id'], $d['norm_name'], $d['norm_batch']]);
+        $possible_duplicates[] = $g->fetchAll();
     }
 }
 
-// For superadmin add form: list of admins
-$admins = [];
-if ($role === 'superadmin') {
-    $admins = $pdo->query("SELECT id,full_name FROM users WHERE role='admin' AND IsActive=1")->fetchAll();
+// Sales history for one product
+$view_history = null; $distribution_data = [];
+if (isset($_GET['view_history'])) {
+    $pid = (int)$_GET['view_history'];
+    if ($is_super) { $q = $pdo->prepare("SELECT * FROM products WHERE id=?"); $q->execute([$pid]); }
+    else           { $q = $pdo->prepare("SELECT * FROM products WHERE id=? AND admin_id=?"); $q->execute([$pid, $admin_id]); }
+    $view_history = $q->fetch();
+    if ($view_history) {
+        $h = $pdo->prepare("SELECT ii.qty, ii.created_at, i.invoice_no, i.customer_name
+                            FROM invoice_items ii JOIN invoices i ON ii.invoice_id=i.id
+                            WHERE i.status=1 AND i.admin_id <=> ?
+                              AND (ii.product_id = ? OR (ii.product_id IS NULL AND ii.product_name=? AND ii.batch=?))
+                            ORDER BY ii.created_at DESC");
+        $h->execute([$view_history['admin_id'], $pid, $view_history['name'], $view_history['batch']]);
+        $distribution_data = $h->fetchAll();
+    }
 }
+$qs_admin = $filter_admin ? '&admin=' . $filter_admin : '';
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Inventory | RUSHIKESH PHARMA</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <style>
-        :root { --primary:#2563eb; --success:#16a34a; --danger:#ef4444; --bg:#f8fafc; --dark:#0f172a; }
-        body { font-family:'Inter',sans-serif; margin:0; background:var(--bg); color:var(--dark); }
-        nav { background:var(--dark); padding:15px 40px; display:flex; justify-content:space-between; align-items:center; color:white; position:sticky; top:0; z-index:1000; }
-        .nav-links a { color:#94a3b8; text-decoration:none; margin-left:20px; font-size:14px; font-weight:500; transition:0.3s; }
-        .nav-links a.active { color:white; border-bottom:2px solid var(--primary); padding-bottom:5px; }
-        .nav-links a:hover { color:white; }
-        .container { max-width:1200px; margin:40px auto; padding:0 20px; }
-        .stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:20px; margin-bottom:30px; }
-        .stat-card { background:white; padding:25px; border-radius:16px; box-shadow:0 4px 6px -1px rgba(0,0,0,0.05); border:1px solid #e2e8f0; }
-        .stat-card h3 { margin:0; font-size:13px; color:#64748b; text-transform:uppercase; }
-        .stat-card p { margin:10px 0 0; font-size:28px; font-weight:800; }
-        .card { background:white; border-radius:16px; box-shadow:0 10px 15px -3px rgba(0,0,0,0.05); padding:30px; margin-bottom:30px; border:1px solid #e2e8f0; }
-        .section-title { font-size:20px; font-weight:700; margin-bottom:25px; display:flex; justify-content:space-between; align-items:center; }
-        .form-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:15px; }
-        input,select { padding:12px; border:1px solid #cbd5e1; border-radius:8px; font-family:inherit; font-size:14px; }
-        .btn { padding:12px 20px; border-radius:8px; font-weight:600; cursor:pointer; border:none; transition:0.2s; }
-        .btn-primary { background:var(--primary); color:white; }
-        .btn-primary:hover { background:#1d4ed8; }
-        table { width:100%; border-collapse:collapse; margin-top:20px; }
-        th { background:#f1f5f9; padding:15px; text-align:left; font-size:12px; text-transform:uppercase; color:#475569; }
-        td { padding:15px; border-bottom:1px solid #f1f5f9; font-size:14px; }
-        tr:hover { background:#f8fafc; }
-        .badge { padding:4px 8px; border-radius:6px; font-size:11px; font-weight:700; }
-        .badge-success { background:#dcfce7; color:#166534; }
-        .badge-danger { background:#fee2e2; color:#991b1b; }
-        .badge-info { background:#dbeafe; color:#1e40af; }
-        .search-bar { width:100%; max-width:300px; margin-bottom:20px; padding:10px; border:1px solid #e2e8f0; border-radius:8px; }
-        .readonly-notice { background:#fef9c3; border:1px solid #fde047; padding:12px 20px; border-radius:10px; margin-bottom:20px; font-size:14px; color:#713f12; }
-        @media(max-width:768px){
-            nav{padding:15px 20px;flex-wrap:wrap;}
-            .nav-links{width:100%;text-align:center;margin-top:8px;}
-            .nav-links a{margin:0 8px;font-size:12px;}
-            .container{padding:0 10px;margin:20px auto;}
-            .stats-grid{grid-template-columns:1fr;}
-            .form-grid{grid-template-columns:1fr;}
-            table{display:block;overflow-x:auto;}
-            th,td{padding:10px 8px;font-size:11px;white-space:nowrap;}
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stock | Pharma Billing</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+<?php echo ui_css(); ?>
+html{scroll-behavior:smooth}
+.page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.page-head h1{margin:0;font-size:24px;font-weight:800}
+.page-head p{margin:4px 0 0;color:var(--muted);font-size:14px}
+.page-head .ph-acts{display:flex;gap:8px;flex-wrap:wrap}
+.admin-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px;margin-bottom:22px}
+.admin-card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:16px;transition:.15s}
+.admin-card:hover{border-color:#93c5fd;box-shadow:0 10px 24px -12px rgba(37,99,235,.35)}
+.admin-card h4{margin:0 0 2px;font-size:16px}.admin-card small{color:var(--muted);display:block}
+.admin-card .nums{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin:12px 0;text-align:center;background:#f8fafc;border-radius:10px;padding:10px 4px}
+.admin-card .nums b{display:block;font-size:17px}.admin-card .nums span{font-size:10px;color:var(--muted);text-transform:uppercase}
+.admin-card .acts{display:flex;gap:8px;flex-wrap:wrap}
+.avatar{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;flex-shrink:0}
+
+/* assign-stock card */
+.assign-card{border:1px solid #bfdbfe;background:linear-gradient(180deg,#f8fbff,#fff 120px)}
+.step{display:flex;align-items:center;gap:10px;font-weight:700;margin:6px 0 10px;font-size:15px}
+.step b{width:24px;height:24px;border-radius:50%;background:var(--primary);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:12px}
+#f_admin{width:100%;max-width:520px;font-weight:600}
+.adm-panel{margin:12px 0 18px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:14px;padding:14px}
+.adm-top{display:flex;gap:12px;align-items:center;font-size:13px;line-height:1.5}
+.adm-top small{color:var(--muted)}
+.adm-nums{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;text-align:center}
+.adm-nums div{background:#fff;border-radius:10px;padding:8px 4px}
+.adm-nums b{display:block;font-size:16px}.adm-nums span{font-size:10px;color:var(--muted);text-transform:uppercase}
+.note{background:#fef9c3;border:1px solid #fde047;color:#713f12;border-radius:10px;padding:10px 14px;margin-top:12px;font-size:13px}
+.sum-bar{margin-top:14px;padding:12px 14px;border-radius:12px;background:#0f172a;color:#e2e8f0;font-size:14px}
+.sum-bar b{color:#fff}
+.add-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px}
+
+.filter-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.act a,.act button.link{background:none;border:none;cursor:pointer;font-size:17px;text-decoration:none;padding:4px 6px;border-radius:8px}
+.act a:hover,.act button.link:hover{background:#f1f5f9}
+.stock-num{font-weight:800;font-size:15px}
+.pname{font-weight:700;color:#0f172a;text-decoration:none}.pname:hover{color:var(--primary)}
+.muted{color:var(--muted)}
+.dgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
+.dcell{background:#f8fafc;border-radius:10px;padding:10px 12px}
+.dcell small{display:block;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:2px}
+.dcell b{font-size:15px}
+.fab{display:none}
+@media(min-width:769px){table.data thead th{position:sticky;top:57px;z-index:5}}
+@media(max-width:768px){
+ .page-head h1{font-size:20px}
+ .page-head .ph-acts{width:100%}.page-head .ph-acts .btn{flex:1;text-align:center}
+ .filter-row select,.filter-row input{width:100%}
+ .act{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+ .adm-nums{grid-template-columns:1fr 1fr}
+ .dgrid{grid-template-columns:1fr 1fr}
+ #f_admin{max-width:none}
+ .fab{display:flex;position:fixed;right:16px;bottom:18px;z-index:1500;width:56px;height:56px;border-radius:50%;background:var(--primary);color:#fff;font-size:28px;align-items:center;justify-content:center;text-decoration:none;box-shadow:0 10px 24px rgba(37,99,235,.5)}
+ .add-actions .btn{width:100%}
+}
+</style>
 </head>
 <body>
-<nav>
-    <div style="font-weight:800;font-size:20px;letter-spacing:-1px;">
-        RUSHIKESH PHARMA
-        <span style="font-weight:300;font-size:14px;color:#94a3b8;">
-            <?php echo $role === 'superadmin' ? 'Super Admin' : 'Admin Portal'; ?>
-        </span>
-    </div>
-    <div class="nav-links">
-        <?php if($role === 'superadmin'): ?>
-            <a href="superadmin.php">Dashboard</a>
-        <?php endif; ?>
-        <a href="inventory.php" class="active">Inventory</a>
-        <?php if($role === 'admin'): ?>
-            <a href="billing.php">Billing</a>
-            <a href="reports.php">Reports</a>
-        <?php endif; ?>
-        <a href="logout.php" style="color:#f87171;">Logout</a>
-    </div>
-</nav>
-
+<?php echo ui_nav('stock'); ?>
 <div class="container">
+    <?php echo flash_show(); ?>
 
-    <?php if($role === 'admin'): ?>
-    <div class="readonly-notice">
-        📦 <strong>Stock View Only</strong> — You can view your inventory. Contact Super Admin to add or remove products.
+    <div class="page-head">
+        <div>
+            <h1>📦 <?php echo $is_super ? 'Stock — all admins' : 'Your stock'; ?></h1>
+            <p><?php echo $is_super ? 'Assign stock to admins, track levels and expiry, and bill on their behalf.' : 'Live stock levels, expiry and sales for your business.'; ?></p>
+        </div>
+        <?php if ($is_super): ?>
+        <div class="ph-acts">
+            <a class="btn btn-primary" href="#addForm" onclick="setTimeout(()=>document.getElementById('f_admin').focus(),400)">＋ Add stock</a>
+            <a class="btn btn-light" href="billing.php<?php echo $filter_admin ? '?for=' . $filter_admin : ''; ?>">🧾 Create bill</a>
+        </div>
+        <?php endif; ?>
     </div>
+
+    <?php if (!$is_super): ?>
+        <div class="alert alert-info">To add or change products, contact the Super Admin.</div>
     <?php endif; ?>
 
-    <?php if(isset($_GET['success'])): ?>
-        <div style="background:#dcfce7;border:1px solid #86efac;padding:12px 20px;border-radius:10px;margin-bottom:20px;color:#166534;">✅ Product added successfully!</div>
-    <?php endif; ?>
-    <?php if(isset($_GET['merged'])): ?>
-        <div style="background:#dcfce7;border:1px solid #86efac;padding:12px 20px;border-radius:10px;margin-bottom:20px;color:#166534;">✅ Stock merged into the existing product — no duplicate row created.</div>
-    <?php endif; ?>
-
-    <?php if($role === 'superadmin' && !empty($possible_duplicates)): ?>
-    <div class="card" style="border:1px solid #fde047;background:#fffbeb;">
-        <div class="section-title">⚠️ Possible Duplicate Products (<?php echo count($possible_duplicates); ?>)</div>
-        <p style="color:#713f12;font-size:13px;margin-top:-15px;margin-bottom:20px;">These look like the same medicine/batch but aren't an exact text match (different spelling or capitalization), so they were <strong>not</strong> merged automatically. Review each group and merge only if they really are the same product.</p>
-        <?php foreach($possible_duplicates as $grp): ?>
-            <table style="margin-bottom:20px;">
+    <?php if ($is_super && !empty($possible_duplicates)): ?>
+    <div class="card" style="border-color:#fde047;background:#fffbeb;">
+        <div class="card-title">⚠️ Possible duplicate products (<?php echo count($possible_duplicates); ?>)</div>
+        <p style="color:#713f12;font-size:13px;margin-top:-6px;">Same medicine/batch but spelled or capitalised differently. Merge only if they really are the same product.</p>
+        <?php foreach ($possible_duplicates as $grp): ?>
+            <table class="data rt" style="margin-bottom:14px;">
                 <thead><tr><th>Admin</th><th>Name</th><th>Batch</th><th>Stock</th><th>Action</th></tr></thead>
                 <tbody>
-                    <?php foreach($grp as $i => $p): ?>
+                <?php foreach ($grp as $i => $p): ?>
                     <tr>
-                        <td><?php echo htmlspecialchars($p['admin_name'] ?? 'Unassigned'); ?></td>
-                        <td><strong>"<?php echo htmlspecialchars($p['name']); ?>"</strong></td>
-                        <td>"<?php echo htmlspecialchars($p['batch']); ?>"</td>
-                        <td><?php echo $p['stock_qty']; ?></td>
-                        <td>
-                            <?php if($i === 0): ?>
-                                <span style="color:#64748b;font-size:12px;">Keep this one</span>
+                        <td data-label="Admin"><?php echo e($p['admin_name'] ?? 'Unassigned'); ?></td>
+                        <td data-label="Name"><strong>"<?php echo e($p['name']); ?>"</strong></td>
+                        <td data-label="Batch">"<?php echo e($p['batch']); ?>"</td>
+                        <td data-label="Stock"><?php echo (int)$p['stock_qty']; ?></td>
+                        <td data-label="Action" class="act">
+                            <?php if ($i === 0): ?><span class="muted" style="font-size:12px;">Keep this one</span>
                             <?php else: ?>
-                                <form method="POST" style="display:inline;" onsubmit="return confirm('Merge stock of &quot;<?php echo htmlspecialchars(addslashes($p['name'])); ?>&quot; into &quot;<?php echo htmlspecialchars(addslashes($grp[0]['name'])); ?>&quot;? This cannot be undone.');">
-                                    <input type="hidden" name="keep_id" value="<?php echo $grp[0]['id']; ?>">
-                                    <input type="hidden" name="merge_id" value="<?php echo $p['id']; ?>">
-                                    <button type="submit" name="merge_products" class="btn" style="background:#d97706;color:white;font-size:12px;padding:6px 12px;">Merge into "<?php echo htmlspecialchars($grp[0]['name']); ?>"</button>
+                                <form method="POST" onsubmit="return confirm('Merge this stock into the first row? This cannot be undone.');">
+                                    <input type="hidden" name="keep_id" value="<?php echo (int)$grp[0]['id']; ?>">
+                                    <input type="hidden" name="merge_id" value="<?php echo (int)$p['id']; ?>">
+                                    <input type="hidden" name="back_admin" value="<?php echo $filter_admin; ?>">
+                                    <button class="btn btn-warn btn-sm" name="merge_products" value="1">Merge into first</button>
                                 </form>
                             <?php endif; ?>
                         </td>
                     </tr>
-                    <?php endforeach; ?>
+                <?php endforeach; ?>
                 </tbody>
             </table>
         <?php endforeach; ?>
     </div>
     <?php endif; ?>
 
+    <?php if ($is_super && !$filter_admin): ?>
+    <div class="admin-cards">
+        <?php foreach ($overview as $o): $ai = $admin_info[(int)$o['id']] ?? null; ?>
+        <div class="admin-card">
+            <div style="display:flex;gap:12px;align-items:center;">
+                <div class="avatar"><?php echo e(strtoupper(substr($o['full_name'], 0, 1))); ?></div>
+                <div style="min-width:0">
+                    <h4><?php echo e($o['full_name']); ?></h4>
+                    <small><?php echo e($o['company_name'] ?: 'Company not set'); ?></small>
+                    <?php if ($ai && $ai['gstin']): ?><small>GSTIN <?php echo e($ai['gstin']); ?></small><?php endif; ?>
+                </div>
+            </div>
+            <div class="nums">
+                <div><b><?php echo (int)$o['prod_count']; ?></b><span>Products</span></div>
+                <div><b><?php echo number_format((int)$o['units']); ?></b><span>Units</span></div>
+                <div><b style="color:<?php echo $o['low'] > 0 ? 'var(--danger)' : 'var(--success)'; ?>"><?php echo (int)$o['low']; ?></b><span>Low / out</span></div>
+            </div>
+            <div style="font-size:13px;margin-bottom:12px;">Stock value: <strong>₹<?php echo number_format((float)$o['val'], 0); ?></strong></div>
+            <div class="acts">
+                <a class="btn btn-light btn-sm" href="inventory.php?admin=<?php echo (int)$o['id']; ?>">View stock</a>
+                <a class="btn btn-primary btn-sm" href="billing.php?for=<?php echo (int)$o['id']; ?>">🧾 Create bill</a>
+            </div>
+        </div>
+        <?php endforeach; ?>
+        <?php if (empty($overview)): ?><div class="alert alert-info">No active admins yet.</div><?php endif; ?>
+    </div>
+    <?php endif; ?>
+
     <div class="stats-grid">
-        <div class="stat-card"><h3>Total Products</h3><p><?php echo $total_items; ?></p></div>
-        <div class="stat-card"><h3>Low Stock Items</h3><p style="color:var(--danger);"><?php echo $low_stock; ?></p></div>
-        <div class="stat-card"><h3>Inventory Value</h3><p style="color:var(--success);">₹<?php echo number_format($total_value,2); ?></p></div>
+        <div class="stat-card"><h3>Products</h3><p><?php echo $total_items; ?></p></div>
+        <div class="stat-card"><h3>Total units</h3><p><?php echo number_format($total_units); ?></p></div>
+        <div class="stat-card"><h3>Low stock (≤<?php echo LOW_STOCK_LIMIT; ?>)</h3><p style="color:var(--warn);"><?php echo $low_stock; ?></p></div>
+        <div class="stat-card"><h3>Out of stock</h3><p style="color:var(--danger);"><?php echo $out_stock; ?></p></div>
+        <div class="stat-card"><h3>Expired / ≤90 days</h3><p style="color:var(--danger);"><?php echo $exp_count; ?></p></div>
+        <div class="stat-card"><h3>Stock value</h3><p style="color:var(--success);">₹<?php echo number_format($total_value, 0); ?></p></div>
     </div>
 
-    <?php if($role === 'superadmin'): ?>
-    <!-- ADD PRODUCT FORM — superadmin only -->
-    <div class="card">
-        <div class="section-title">Add New Inventory Item</div>
-        <form method="POST" class="form-grid">
-            <select name="target_admin_id" required>
-                <option value="">-- Assign to Admin --</option>
-                <?php foreach($admins as $a): ?>
-                    <option value="<?php echo $a['id']; ?>"><?php echo htmlspecialchars($a['full_name']); ?></option>
+    <?php if ($is_super): ?>
+    <div class="card assign-card" id="addForm">
+        <div class="card-title">➕ Add stock to an admin</div>
+        <form method="POST" id="addStockForm" autocomplete="off">
+            <input type="hidden" name="back_admin" value="<?php echo $filter_admin; ?>">
+
+            <div class="step"><b>1</b> Who is this stock for?</div>
+            <select name="target_admin_id" id="f_admin" required onchange="onAdminChange()">
+                <option value="">— Select the admin to assign this stock to —</option>
+                <?php foreach ($admins as $a): ?>
+                    <option value="<?php echo (int)$a['id']; ?>" <?php echo $filter_admin === (int)$a['id'] ? 'selected' : ''; ?>>
+                        <?php echo e($a['full_name'] . ($a['company_name'] ? ' — ' . $a['company_name'] : '')); ?>
+                    </option>
                 <?php endforeach; ?>
             </select>
-            <input type="text" name="name" placeholder="Medicine Name" required>
-            <input type="text" name="batch" placeholder="Batch Number" required>
-            <input type="month" name="expiry" required>
-            <input type="text" name="capacity" placeholder="Capacity (e.g. 10 Tabs)" required>
-            <input type="number" step="0.01" name="rate" placeholder="Unit Rate (₹)" required>
-            <input type="number" name="stock_qty" placeholder="Stock Quantity" required>
-            <select name="gst_percent">
-                <option value="5">5% GST</option>
-                <option value="12">12% GST</option>
-                <option value="18">18% GST</option>
-                <option value="0">Exempted</option>
-            </select>
-            <button type="submit" name="add_product" class="btn btn-primary">+ Add Product</button>
+            <div id="adminInfo" class="adm-panel" style="display:none"></div>
+
+            <div class="step" style="margin-top:18px"><b>2</b> Product details</div>
+            <div class="form-grid">
+                <div><label>Medicine name</label><input type="text" name="name" id="f_name" list="nameList" placeholder="e.g. Paracetamol 500" required oninput="checkMatch();updateSummary()"></div>
+                <div><label>Batch no.</label><input type="text" name="batch" id="f_batch" placeholder="Batch number" required oninput="checkMatch();updateSummary()"></div>
+                <div><label>Expiry</label><input type="month" name="expiry" id="f_expiry" required></div>
+                <div><label>Capacity / pack</label><input type="text" name="capacity" id="f_cap" placeholder="e.g. 10 Tabs"></div>
+                <div><label>Rate per unit (₹)</label><input type="number" step="0.01" min="0" name="rate" id="f_rate" placeholder="0.00" required oninput="updateSummary()"></div>
+                <div><label>Quantity to add</label><input type="number" min="0" step="1" name="stock_qty" id="f_qty" placeholder="0" inputmode="numeric" required oninput="updateSummary()"></div>
+                <div><label>GST</label>
+                    <select name="gst_percent" id="f_gst"><option value="5">5% GST</option><option value="12">12% GST</option><option value="18">18% GST</option><option value="0">Exempt</option></select></div>
+            </div>
+            <datalist id="nameList"></datalist>
+            <div id="matchNote" class="note" style="display:none"></div>
+            <div class="sum-bar" id="sumBar">Choose the admin first, then fill in the product.</div>
+            <div class="add-actions">
+                <button type="submit" name="add_product" value="1" class="btn btn-primary" id="addBtn">＋ Assign stock</button>
+                <span class="muted" style="font-size:12px;">Same name + batch for the same admin tops up the existing stock instead of creating a duplicate.</span>
+            </div>
         </form>
     </div>
     <?php endif; ?>
 
-    <!-- PRODUCT TABLE -->
     <div class="card">
-        <div class="section-title">
-            <?php echo $role === 'superadmin' ? 'All Stock (All Admins)' : 'Your Stock Levels'; ?>
-            <input type="text" id="tableSearch" class="search-bar" placeholder="Filter medicines..." onkeyup="filterTable()">
+        <div class="card-title">
+            <span><?php echo $is_super ? ($filter_admin ? 'Stock — ' . e($filter_name) : 'All products (all admins)') : 'Your products'; ?></span>
+            <?php if ($is_super && $filter_admin): ?>
+                <span><a class="btn btn-primary btn-sm" href="billing.php?for=<?php echo $filter_admin; ?>">🧾 Create bill for this admin</a>
+                      <a class="btn btn-light btn-sm" href="inventory.php">← All admins</a></span>
+            <?php endif; ?>
         </div>
-        <table id="inventoryTable">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <?php if($role === 'superadmin'): ?><th>Admin</th><?php endif; ?>
-                    <th>Product Name</th>
-                    <th>Batch</th>
-                    <th>Expiry</th>
-                    <th>Rate</th>
-                    <th>Stock</th>
-                    <th>Status</th>
-                    <th>Action</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach($products as $p): ?>
-                <tr>
-                    <td>#<?php echo $p['id']; ?></td>
-                    <?php if($role === 'superadmin'): ?>
-                        <td><span class="badge badge-info"><?php echo htmlspecialchars($p['admin_name'] ?? 'Unassigned'); ?></span></td>
-                    <?php endif; ?>
-                    <td><strong><?php echo htmlspecialchars($p['name']); ?></strong><br><small style="color:#64748b"><?php echo $p['capacity']; ?></small></td>
-                    <td><?php echo $p['batch']; ?></td>
-                    <td><?php echo $p['expiry']; ?></td>
-                    <td>₹<?php echo $p['rate']; ?></td>
-                    <td><strong><?php echo $p['stock_qty']; ?></strong></td>
-                    <td>
-                        <?php if($p['stock_qty'] > 10): ?>
-                            <span class="badge badge-success">In Stock</span>
-                        <?php else: ?>
-                            <span class="badge badge-danger">Low Stock</span>
-                        <?php endif; ?>
-                    </td>
-                    <td>
-                        <a href="?view_history=<?php echo $p['id']; ?>" style="color:var(--primary);text-decoration:none;margin-right:10px;" title="Distribution History">📊</a>
-                        <?php if($role === 'superadmin'): ?>
-                            <a href="?delete=<?php echo $p['id']; ?>" onclick="return confirm('Confirm Delete?')" style="color:var(--danger);font-size:18px;text-decoration:none;">&times;</a>
-                        <?php endif; ?>
-                    </td>
-                </tr>
+        <div class="filter-row">
+            <?php if ($is_super): ?>
+            <select onchange="location.href='inventory.php'+(this.value?'?admin='+this.value:'')">
+                <option value="">All admins</option>
+                <?php foreach ($admins as $a): ?>
+                    <option value="<?php echo (int)$a['id']; ?>" <?php echo $filter_admin === (int)$a['id'] ? 'selected' : ''; ?>><?php echo e($a['full_name']); ?></option>
                 <?php endforeach; ?>
+            </select>
+            <?php endif; ?>
+            <input type="search" id="tableSearch" class="search-bar" placeholder="🔍 Search medicine / batch..." oninput="filterTable()">
+            <select id="statusFilter" onchange="filterTable()">
+                <option value="">All status</option><option value="out">Out of stock</option><option value="low">Low stock</option><option value="exp">Expired / expiring</option>
+            </select>
+            <span class="muted" style="font-size:13px;" id="rowCount"></span>
+        </div>
+        <table class="data rt" id="inventoryTable">
+            <thead><tr>
+                <?php if ($is_super): ?><th>Admin</th><?php endif; ?>
+                <th>Product</th><th>Batch</th><th>Expiry</th><th>Rate</th><th>Stock</th><th>Value</th><th>Status</th><th style="text-align:right">Actions</th>
+            </tr></thead>
+            <tbody>
+            <?php foreach ($products as $p):
+                $q = (int)$p['stock_qty']; $ex = expiry_state($p['expiry']);
+                $flag = ($q <= 0 ? 'out ' : ($q <= LOW_STOCK_LIMIT ? 'low ' : '')) . (in_array($ex, ['expired', 'soon'], true) ? 'exp' : '');
+                $sv = $sold[(int)$p['id']] ?? null;
+                $ai = $admin_info[(int)$p['admin_id']] ?? null;
+                $detail = [
+                    'id' => (int)$p['id'], 'admin_id' => (int)$p['admin_id'], 'admin' => $p['admin_name'] ?? '',
+                    'company' => $ai['company'] ?? '', 'gstin' => $ai['gstin'] ?? '',
+                    'name' => $p['name'], 'batch' => $p['batch'], 'capacity' => $p['capacity'], 'expiry' => $p['expiry'], 'exp' => $ex,
+                    'rate' => $p['rate'], 'gst' => $p['gst_percent'], 'stock' => max(0, $q),
+                    'value' => max(0, $q) * (float)$p['rate'],
+                    'sold' => (int)($sv['sold'] ?? 0), 'last' => $sv ? date('d-M-Y', strtotime($sv['last_sold'])) : '—',
+                ];
+                $j = json_encode($detail, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_HEX_TAG);
+            ?>
+                <tr data-flags="<?php echo trim($flag); ?>">
+                    <?php if ($is_super): ?><td data-label="Admin"><span class="badge b-blue"><?php echo e($p['admin_name'] ?? 'Unassigned'); ?></span></td><?php endif; ?>
+                    <td data-label="Product"><div style="text-align:inherit"><a href="#" class="pname" onclick='openDetail(<?php echo $j; ?>);return false;'><?php echo e($p['name']); ?></a><br><small class="muted"><?php echo e($p['capacity']); ?></small></div></td>
+                    <td data-label="Batch"><?php echo e($p['batch']); ?></td>
+                    <td data-label="Expiry"><?php echo e($p['expiry']); ?>
+                        <?php if ($ex === 'expired'): ?> <span class="badge b-red">Expired</span><?php elseif ($ex === 'soon'): ?> <span class="badge b-amber">Expiring</span><?php endif; ?></td>
+                    <td data-label="Rate">₹<?php echo e($p['rate']); ?> <small class="muted">· GST <?php echo e(rtrim(rtrim(number_format((float)$p['gst_percent'], 2), '0'), '.')); ?>%</small></td>
+                    <td data-label="Stock"><span class="stock-num"><?php echo max(0, $q); ?></span></td>
+                    <td data-label="Value">₹<?php echo number_format(max(0, $q) * (float)$p['rate'], 0); ?></td>
+                    <td data-label="Status">
+                        <?php if ($q <= 0): ?><span class="badge b-red">Out of stock</span>
+                        <?php elseif ($q <= LOW_STOCK_LIMIT): ?><span class="badge b-amber">Low stock</span>
+                        <?php else: ?><span class="badge b-green">In stock</span><?php endif; ?>
+                    </td>
+                    <td data-label="Actions" class="act" style="text-align:right">
+                        <button type="button" class="link" title="Details" onclick='openDetail(<?php echo $j; ?>)'>👁️</button>
+                        <a href="?view_history=<?php echo (int)$p['id'] . $qs_admin; ?>" title="Sales history">📊</a>
+                        <?php if ($is_super): ?>
+                            <button type="button" class="link" title="Edit" onclick='openEdit(<?php echo $j; ?>)'>✏️</button>
+                            <form method="POST" style="display:inline" onsubmit="return confirm('Delete this product permanently?')">
+                                <input type="hidden" name="id" value="<?php echo (int)$p['id']; ?>">
+                                <input type="hidden" name="back_admin" value="<?php echo $filter_admin; ?>">
+                                <button class="link" name="delete_product" value="1" title="Delete" style="color:var(--danger)">🗑️</button>
+                            </form>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (empty($products)): ?>
+                <tr><td colspan="10" class="no-label" style="text-align:center;color:#94a3b8;padding:30px;">No products found.</td></tr>
+            <?php endif; ?>
             </tbody>
         </table>
     </div>
 </div>
 
-<script>
-function filterTable() {
-    let filter = document.getElementById("tableSearch").value.toUpperCase();
-    let tr = document.getElementById("inventoryTable").getElementsByTagName("tr");
-    for (let i = 1; i < tr.length; i++) {
-        let td = tr[i].getElementsByTagName("td")[<?php echo $role === 'superadmin' ? 2 : 1; ?>];
-        if (td) tr[i].style.display = td.textContent.toUpperCase().indexOf(filter) > -1 ? "" : "none";
-    }
-}
-</script>
+<?php if ($is_super): ?>
+<a href="#addForm" class="fab" title="Add stock" onclick="setTimeout(()=>document.getElementById('f_admin').focus(),400)">＋</a>
 
-<?php if($view_history): ?>
-<div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;">
-    <div class="card" style="max-width:800px;width:90%;max-height:80vh;overflow-y:auto;margin:20px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-            <h2 style="margin:0;font-size:20px;">📊 Distribution History</h2>
-            <a href="inventory.php" style="font-size:24px;text-decoration:none;color:#64748b;">&times;</a>
+<div class="modal-bg" id="editModal" onclick="if(event.target===this)closeEdit()">
+    <div class="modal">
+        <h2>✏️ Edit product</h2>
+        <div id="editTitle" class="muted" style="font-size:13px;margin:-8px 0 14px;"></div>
+        <form method="POST" class="form-grid" style="grid-template-columns:1fr 1fr;">
+            <input type="hidden" name="id" id="e_id">
+            <input type="hidden" name="back_admin" value="<?php echo $filter_admin; ?>">
+            <div><label>Stock quantity</label><input type="number" name="stock_qty" id="e_stock" min="0" step="1" inputmode="numeric" required></div>
+            <div><label>Rate (₹)</label><input type="number" name="rate" id="e_rate" min="0" step="0.01" required></div>
+            <div><label>Expiry</label><input type="month" name="expiry" id="e_expiry"></div>
+            <div><label>GST %</label><input type="number" name="gst_percent" id="e_gst" min="0" max="100" step="0.01"></div>
+            <div style="grid-column:1/-1"><label>Capacity / pack</label><input type="text" name="capacity" id="e_cap"></div>
+            <div style="grid-column:1/-1;display:flex;gap:10px;justify-content:flex-end;">
+                <button type="button" class="btn btn-light" onclick="closeEdit()">Cancel</button>
+                <button type="submit" name="edit_product" value="1" class="btn btn-primary">💾 Save</button>
+            </div>
+        </form>
+        <p class="muted" style="font-size:12px;margin:10px 0 0;">Stock can't be set below 0. Changing stock here does not create an invoice.</p>
+    </div>
+</div>
+<?php endif; ?>
+
+<div class="modal-bg" id="detailModal" onclick="if(event.target===this)closeDetail()">
+    <div class="modal" style="max-width:600px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+            <div><h2 id="d_title" style="margin:0"></h2><div id="d_sub" class="muted" style="font-size:13px;margin-top:4px;"></div></div>
+            <a href="#" onclick="closeDetail();return false;" style="font-size:26px;text-decoration:none;color:#64748b;line-height:1">&times;</a>
         </div>
-        <div style="background:#f8fafc;padding:15px;border-radius:8px;margin-bottom:20px;">
-            <strong><?php echo htmlspecialchars($view_history['name']); ?></strong><br>
-            <span style="color:#64748b;font-size:13px;">Batch: <?php echo $view_history['batch']; ?> | Current Stock: <strong><?php echo $view_history['stock_qty']; ?></strong></span>
+        <div id="d_status" style="margin-top:10px"></div>
+        <div class="dgrid" id="d_grid"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap" id="d_acts"></div>
+    </div>
+</div>
+
+<?php if ($view_history): ?>
+<div class="modal-bg open">
+    <div class="modal" style="max-width:760px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h2 style="margin:0">📊 Sales history</h2>
+            <a href="inventory.php<?php echo $filter_admin ? '?admin=' . $filter_admin : ''; ?>" style="font-size:26px;text-decoration:none;color:#64748b;">&times;</a>
         </div>
-        <?php if(count($distribution_data) > 0): ?>
-            <table style="width:100%;border-collapse:collapse;">
-                <thead><tr style="background:#f1f5f9;">
-                    <th style="padding:12px;text-align:left;">Invoice No</th>
-                    <th style="padding:12px;text-align:left;">Customer</th>
-                    <th style="padding:12px;text-align:center;">Qty Sold</th>
-                    <th style="padding:12px;text-align:left;">Date</th>
-                </tr></thead>
+        <div style="background:#f8fafc;padding:12px;border-radius:8px;margin:14px 0;">
+            <strong><?php echo e($view_history['name']); ?></strong><br>
+            <span class="muted" style="font-size:13px;">Batch: <?php echo e($view_history['batch']); ?> · Current stock: <strong><?php echo max(0, (int)$view_history['stock_qty']); ?></strong></span>
+        </div>
+        <?php if ($distribution_data): $total_dist = 0; ?>
+            <table class="data rt">
+                <thead><tr><th>Invoice</th><th>Customer</th><th>Qty sold</th><th>Date</th></tr></thead>
                 <tbody>
-                    <?php $total_dist=0; foreach($distribution_data as $d): $total_dist+=$d['qty']; ?>
-                    <tr style="border-bottom:1px solid #f1f5f9;">
-                        <td style="padding:12px;"><strong>#<?php echo $d['invoice_no']; ?></strong></td>
-                        <td style="padding:12px;"><?php echo htmlspecialchars($d['customer_name']); ?></td>
-                        <td style="padding:12px;text-align:center;font-weight:bold;color:var(--danger);"><?php echo $d['qty']; ?></td>
-                        <td style="padding:12px;"><?php echo date('d-M-Y',strtotime($d['created_at'])); ?></td>
+                <?php foreach ($distribution_data as $d): $total_dist += (int)$d['qty']; ?>
+                    <tr>
+                        <td data-label="Invoice"><strong>#<?php echo e($d['invoice_no']); ?></strong></td>
+                        <td data-label="Customer"><?php echo e($d['customer_name']); ?></td>
+                        <td data-label="Qty sold" style="color:var(--danger);font-weight:700"><?php echo (int)$d['qty']; ?></td>
+                        <td data-label="Date"><?php echo date('d-M-Y', strtotime($d['created_at'])); ?></td>
                     </tr>
-                    <?php endforeach; ?>
+                <?php endforeach; ?>
                 </tbody>
-                <tfoot><tr style="background:#f8fafc;font-weight:bold;">
-                    <td colspan="2" style="padding:12px;border-top:2px solid #e2e8f0;">Total Distributed</td>
-                    <td style="padding:12px;text-align:center;border-top:2px solid #e2e8f0;color:var(--danger);"><?php echo $total_dist; ?></td>
-                    <td style="padding:12px;border-top:2px solid #e2e8f0;"></td>
-                </tr></tfoot>
+                <tfoot><tr><td colspan="2" class="no-label"><strong>Total sold</strong></td><td class="no-label" style="color:var(--danger);font-weight:800"><?php echo $total_dist; ?></td><td></td></tr></tfoot>
             </table>
         <?php else: ?>
-            <div style="text-align:center;padding:40px;color:#94a3b8;"><div style="font-size:48px;">📦</div><p>No distribution history found.</p></div>
+            <div style="text-align:center;padding:30px;color:#94a3b8;"><div style="font-size:42px;">📦</div>No sales yet for this product.</div>
         <?php endif; ?>
     </div>
 </div>
 <?php endif; ?>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = n => '₹' + Number(n || 0).toLocaleString('en-IN', {maximumFractionDigits: 2});
+const IS_SUPER = <?php echo $is_super ? 'true' : 'false'; ?>;
+const QS_ADMIN = <?php echo json_encode($qs_admin); ?>;
+const ADMINS = <?php echo json_encode((object)$admin_info, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+const PRODS  = <?php echo json_encode($all_products_min, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+
+/* ---------- table filter ---------- */
+function filterTable() {
+    const q = $('tableSearch').value.toLowerCase(), f = $('statusFilter').value;
+    let n = 0;
+    document.querySelectorAll('#inventoryTable tbody tr[data-flags]').forEach(tr => {
+        const ok = tr.textContent.toLowerCase().includes(q) && (!f || (tr.dataset.flags || '').split(' ').includes(f));
+        tr.style.display = ok ? '' : 'none';
+        if (ok) n++;
+    });
+    $('rowCount').textContent = n + ' shown';
+}
+filterTable();
+
+/* ---------- add-stock form (superadmin) ---------- */
+let matched = null;
+const norm = s => String(s || '').trim().toLowerCase();
+
+function onAdminChange() {
+    const a = ADMINS[$('f_admin').value], box = $('adminInfo');
+    if (!a) { box.style.display = 'none'; box.innerHTML = ''; fillNames(); checkMatch(); updateSummary(); return; }
+    box.innerHTML =
+        `<div class="adm-top"><div class="avatar">${esc(a.name.charAt(0).toUpperCase())}</div>
+           <div><strong>${esc(a.name)}</strong> <small>@${esc(a.username)}</small><br>
+           <span>${esc(a.company || 'Company not set')}</span>${a.gstin ? ' · GSTIN ' + esc(a.gstin) : ''}${a.phone ? ' · 📞 ' + esc(a.phone) : ''}</div></div>
+         <div class="adm-nums">
+           <div><b>${a.products}</b><span>Products</span></div>
+           <div><b>${Number(a.units).toLocaleString('en-IN')}</b><span>Units</span></div>
+           <div><b>${money(a.value)}</b><span>Stock value</span></div>
+           <div><b style="color:${a.low ? '#dc2626' : '#16a34a'}">${a.low}</b><span>Low / out</span></div>
+         </div>`;
+    box.style.display = 'block';
+    fillNames(); checkMatch(); updateSummary();
+}
+
+function fillNames() {
+    const id = +$('f_admin').value, dl = $('nameList'), seen = new Set();
+    dl.innerHTML = '';
+    PRODS.filter(p => +p.admin_id === id).forEach(p => {
+        if (seen.has(p.name)) return;
+        seen.add(p.name);
+        const o = document.createElement('option'); o.value = p.name; dl.appendChild(o);
+    });
+}
+
+function checkMatch() {
+    const id = +$('f_admin').value, n = norm($('f_name').value), b = norm($('f_batch').value), note = $('matchNote');
+    matched = (id && n && b) ? (PRODS.find(p => +p.admin_id === id && norm(p.name) === n && norm(p.batch) === b) || null) : null;
+    if (matched) {
+        note.style.display = 'block';
+        note.innerHTML = `ℹ️ This product + batch already exists for this admin (current stock <b>${matched.stock_qty}</b>). The quantity below will be <b>added</b> to it, and rate / expiry / GST will be updated.`;
+        if (!$('f_rate').value) $('f_rate').value = matched.rate;
+        if (!$('f_cap').value) $('f_cap').value = matched.capacity || '';
+        if (!$('f_expiry').value && /^\d{4}-\d{2}/.test(matched.expiry || '')) $('f_expiry').value = matched.expiry.substring(0, 7);
+        const g = String(parseFloat(matched.gst_percent));
+        if ([...$('f_gst').options].some(o => o.value === g)) $('f_gst').value = g;
+    } else {
+        note.style.display = 'none';
+    }
+}
+
+function updateSummary() {
+    const a = ADMINS[$('f_admin').value];
+    const q = parseInt($('f_qty').value) || 0, r = parseFloat($('f_rate').value) || 0;
+    $('sumBar').innerHTML = a
+        ? `Adding <b>${q}</b> × ${money(r)} = <b>${money(q * r)}</b> to <b>${esc(a.name)}</b>${a.company ? ' (' + esc(a.company) + ')' : ''}` +
+          (matched ? ` · new stock will be <b>${(+matched.stock_qty) + q}</b>` : ' · new product')
+        : 'Choose the admin first, then fill in the product.';
+    $('addBtn').textContent = a ? '＋ Assign to ' + a.name : '＋ Assign stock';
+}
+
+if (IS_SUPER) {
+    $('addStockForm').addEventListener('submit', e => {
+        const a = ADMINS[$('f_admin').value];
+        if (!a) { e.preventDefault(); alert('Please choose the admin first.'); return; }
+        const q = parseInt($('f_qty').value) || 0;
+        if (!confirm(`Add ${q} units of "${$('f_name').value.trim()}" (batch ${$('f_batch').value.trim()}) to ${a.name}${a.company ? ' — ' + a.company : ''}?`)) e.preventDefault();
+    });
+    onAdminChange();
+}
+
+/* ---------- edit modal ---------- */
+function openEdit(p) {
+    $('e_id').value = p.id;
+    $('editTitle').textContent = p.name + ' · batch ' + p.batch + (p.admin ? ' · ' + p.admin : '');
+    $('e_stock').value = p.stock;
+    $('e_rate').value = p.rate;
+    $('e_expiry').value = /^\d{4}-\d{2}/.test(p.expiry || '') ? p.expiry.substring(0, 7) : '';
+    $('e_gst').value = p.gst;
+    $('e_cap').value = p.capacity || '';
+    closeDetail();
+    $('editModal').classList.add('open');
+}
+function closeEdit() { $('editModal').classList.remove('open'); }
+
+/* ---------- details modal ---------- */
+function openDetail(p) {
+    $('d_title').textContent = p.name;
+    $('d_sub').textContent = 'Batch ' + p.batch + (p.capacity ? ' · ' + p.capacity : '') + ' · #' + p.id;
+    let st = p.stock <= 0 ? '<span class="badge b-red">Out of stock</span>'
+           : p.stock <= <?php echo LOW_STOCK_LIMIT; ?> ? '<span class="badge b-amber">Low stock</span>' : '<span class="badge b-green">In stock</span>';
+    if (p.exp === 'expired') st += ' <span class="badge b-red">Expired</span>';
+    else if (p.exp === 'soon') st += ' <span class="badge b-amber">Expiring within 90 days</span>';
+    $('d_status').innerHTML = st;
+    const cells = [
+        ['Stock on hand', p.stock + ' units'], ['Stock value', money(p.value)],
+        ['Rate / unit', money(p.rate)], ['GST', parseFloat(p.gst) + '%'],
+        ['Expiry', p.expiry || '—'], ['Units sold (all time)', p.sold],
+        ['Last sold', p.last],
+    ];
+    if (p.admin) { cells.unshift(['Assigned to', p.admin + (p.company ? ' — ' + p.company : '')]); if (p.gstin) cells.push(['Admin GSTIN', p.gstin]); }
+    $('d_grid').innerHTML = cells.map(c => `<div class="dcell"><small>${esc(c[0])}</small><b>${esc(c[1])}</b></div>`).join('');
+    let acts = `<a class="btn btn-light btn-sm" href="?view_history=${p.id}${QS_ADMIN}">📊 Sales history</a>`;
+    if (IS_SUPER) {
+        acts += ` <button class="btn btn-primary btn-sm" type="button" id="d_edit">✏️ Edit</button>`;
+        if (p.admin_id) acts += ` <a class="btn btn-success btn-sm" href="billing.php?for=${p.admin_id}">🧾 Create bill for ${esc(p.admin)}</a>`;
+    }
+    $('d_acts').innerHTML = acts;
+    if (IS_SUPER) $('d_edit').onclick = () => openEdit(p);
+    $('detailModal').classList.add('open');
+}
+function closeDetail() { $('detailModal').classList.remove('open'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeDetail(); if (IS_SUPER) closeEdit(); } });
+</script>
 </body>
 </html>
