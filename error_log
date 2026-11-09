@@ -1,0 +1,32 @@
+[18-Dec-2025 16:35:08 UTC] PHP Parse error:  syntax error, unexpected end of file in /home/reli446436/public_html/admin.php on line 403
+[18-Dec-2025 16:35:11 UTC] PHP Parse error:  syntax error, unexpected end of file in /home/reli446436/public_html/admin.php on line 403
+[18-Dec-2025 16:35:13 UTC] PHP Parse error:  syntax error, unexpected end of file in /home/reli446436/public_html/admin.php on line 403
+[18-Dec-2025 16:35:14 UTC] PHP Parse error:  syntax error, unexpected end of file in /home/reli446436/public_html/admin.php on line 403
+[18-Dec-2025 16:35:27 UTC] PHP Parse error:  syntax error, unexpected end of file in /home/reli446436/public_html/admin.php on line 403
+[18-Dec-2025 16:39:21 UTC] PHP Parse error:  syntax error, unexpected end of file in /home/reli446436/public_html/admin.php on line 403
+[18-Dec-2025 16:39:25 UTC] PHP Parse error:  syntax error, unexpected end of file in /home/reli446436/public_html/admin.php on line 403
+[18-Dec-2025 17:21:40 UTC] PHP Warning:  Undefined array key "BackgroundImage" in /home/reli446436/public_html/index.php on line 82
+[18-Dec-2025 17:42:11 UTC] PHP Warning:  Undefined array key "BackgroundImage" in /home/reli446436/public_html/index.php on line 82
+[18-Dec-2025 17:42:25 UTC] PHP Warning:  Undefined array key "BackgroundImage" in /home/reli446436/public_html/index.php on line 82
+[18-Dec-2025 17:42:39 UTC] PHP Warning:  Undefined array key "BackgroundImage" in /home/reli446436/public_html/index.php on line 82
+[22-Dec-2025 18:51:36 UTC] Database Connection Error: SQLSTATE[HY000] [1045] Access denied for user 'root'@'localhost' (using password: NO)
+[22-Dec-2025 18:51:36 UTC] PHP Fatal error:  Uncaught Error: Call to a member function query() on null in /home/reli446436/public_html/index.php:5
+Stack trace:
+#0 {main}
+  thrown in /home/reli446436/public_html/index.php on line 5
+[22-Dec-2025 18:51:40 UTC] Database Connection Error: SQLSTATE[HY000] [1045] Access denied for user 'root'@'localhost' (using password: NO)
+[22-Dec-2025 18:51:40 UTC] PHP Fatal error:  Uncaught Error: Call to a member function query() on null in /home/reli446436/public_html/index.php:5
+Stack trace:
+#0 {main}
+  thrown in /home/reli446436/public_html/index.php on line 5
+[10-Mar-2026 16:52:55 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:52:58 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:32 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:36 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:37 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:38 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:38 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:38 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:38 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:39 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
+[10-Mar-2026 16:53:39 UTC] PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in /home/reli446436/public_html/billing.php on line 434
