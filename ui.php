@@ -10,10 +10,76 @@ function e($v): string { return htmlspecialchars((string)($v ?? ''), ENT_QUOTES,
 
 /* ---------- flash messages (survive one redirect) ---------- */
 function flash_set(string $type, string $text): void { $_SESSION['flash'] = ['type' => $type, 'text' => $text]; }
+// Shown as a SweetAlert popup (success = small toast, error = dialog). Falls back to a plain banner without JS.
 function flash_show(): string {
     if (empty($_SESSION['flash'])) return '';
     $f = $_SESSION['flash']; unset($_SESSION['flash']);
-    return '<div class="alert alert-' . e($f['type']) . '">' . e($f['text']) . '</div>';
+    $type = ($f['type'] === 'success') ? 'success' : 'error';
+    return '<noscript><div class="alert alert-' . e($f['type']) . '">' . e($f['text']) . '</div></noscript>'
+         . '<script>document.addEventListener("DOMContentLoaded",function(){uiFlash(' . json_encode($type) . ',' . json_encode((string)$f['text'], JSON_HEX_TAG | JSON_HEX_AMP) . ')});</script>';
+}
+
+/* ---------- SweetAlert2 + helpers (replaces the browser's alert()/confirm()) ----------
+ * Usage in pages:
+ *   <form method="POST" data-confirm="Delete this?" data-confirm-text="Optional detail" data-confirm-btn="Yes, delete" data-danger>
+ *   <a href="..." data-confirm="Cancel this invoice?">
+ *   uiToast('success'|'error'|'info'|'warning', 'text')      small notification
+ *   uiAlert('error', 'Title', 'html text')                    dialog
+ *   uiConfirm({title, html, confirm, danger}) -> Promise<bool>
+ * A form may define  form.__check = () => bool  to validate before the confirmation appears.
+ * If the CDN is blocked, everything falls back to the normal browser dialogs. */
+function ui_swal(): string {
+    static $done = false;
+    if ($done) return '';
+    $done = true;
+    return <<<'HTML'
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11.14.5/dist/sweetalert2.all.min.js"></script>
+<style>.swal2-popup{font-family:'Inter',system-ui,sans-serif;border-radius:18px}.swal2-title{font-size:1.25rem}.swal2-html-container{font-size:.95rem}.swal2-styled.swal2-confirm,.swal2-styled.swal2-cancel,.swal2-styled.swal2-deny{border-radius:10px;font-weight:700}</style>
+<script>
+(function(){
+  var has=function(){return typeof Swal!=='undefined'};
+  window.uiToast=function(type,text){
+    if(!has()){alert(text);return}
+    Swal.fire({toast:true,position:'top',icon:type,title:text,showConfirmButton:false,timer:4500,timerProgressBar:true});
+  };
+  window.uiAlert=function(type,title,html){
+    if(!has()){alert(title+(html?'\n'+String(html).replace(/<[^>]+>/g,''):''));return Promise.resolve()}
+    return Swal.fire({icon:type,title:title,html:html||'',confirmButtonColor:'#2563eb'});
+  };
+  window.uiConfirm=function(o){
+    o=o||{};
+    if(!has())return Promise.resolve(confirm((o.title||'Are you sure?')+(o.html?'\n'+String(o.html).replace(/<[^>]+>/g,''):'')));
+    return Swal.fire({icon:o.icon||(o.danger?'warning':'question'),title:o.title||'Are you sure?',html:o.html||'',showCancelButton:true,
+      confirmButtonText:o.confirm||'Yes, continue',cancelButtonText:'Cancel',reverseButtons:true,focusCancel:!!o.danger,
+      confirmButtonColor:o.danger?'#dc2626':'#2563eb'}).then(function(r){return r.isConfirmed});
+  };
+  window.uiFlash=function(type,text){
+    if(type==='success')uiToast('success',text); else uiAlert('error','Could not do that',text);
+  };
+  function opts(el){
+    return {title:el.dataset.confirm,html:el.dataset.confirmText||'',confirm:el.dataset.confirmBtn||'Yes, continue',danger:el.dataset.danger!==undefined};
+  }
+  document.addEventListener('submit',function(e){
+    var f=e.target;
+    if(!f||!f.dataset||!f.dataset.confirm||f.__ok)return;
+    if(typeof f.__check==='function'&&f.__check()===false){e.preventDefault();return}
+    e.preventDefault();
+    var sub=e.submitter;
+    uiConfirm(opts(f)).then(function(ok){
+      if(!ok)return;
+      f.__ok=true;
+      if(f.requestSubmit){f.requestSubmit(sub||undefined)}else{f.submit()}
+    });
+  },true);
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('a[data-confirm]');
+    if(!a)return;
+    e.preventDefault();
+    uiConfirm(opts(a)).then(function(ok){if(ok)location.href=a.href});
+  });
+})();
+</script>
+HTML;
 }
 
 /* ---------- expiry helper: products store expiry as text, usually YYYY-MM ---------- */
@@ -127,7 +193,7 @@ function ui_nav(string $active): string {
         $h .= '<a href="' . $href . '"' . ($key === $active ? ' class="active"' : '') . '>' . $label . '</a>';
     }
     $h .= '<a href="logout.php" class="logout">Logout</a></div></div></nav>';
-    return $h;
+    return $h . ui_swal();   // every page that shows the menu also gets SweetAlert
 }
 
 /* ---------- base CSS (all billing pages) ---------- */

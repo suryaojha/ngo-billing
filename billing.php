@@ -412,11 +412,9 @@ const FOR_ADMIN = <?php echo json_encode($role === 'superadmin' ? (int)$stock_ad
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let activeRow = null, results = [], hl = -1, searchTimer = null, saved = false;
 
+// SweetAlert toast (ui.php); kind: 'err' | 'ok' | anything else = info
 function toast(msg, kind) {
-    const t = document.getElementById('toast');
-    t.textContent = msg; t.className = 'toast ' + (kind || '');
-    t.style.display = 'block';
-    clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = 'none', 4200);
+    uiToast(kind === 'err' ? 'error' : (kind === 'ok' ? 'success' : 'info'), msg);
 }
 
 function numToWords(n) {
@@ -624,7 +622,12 @@ function saveInvoiceToDB() {
     fetch('billing.php', {method: 'POST', body: fd}).then(r => r.json()).then(res => {
         if (res.status === 'success') {
             saved = true;
-            toast(res.msg, 'ok');
+            if (window.Swal) {
+                Swal.fire({icon: 'success', title: 'Invoice #' + res.invoice_no + ' saved', html: 'Stock has been updated.',
+                    showDenyButton: true, showCancelButton: true, confirmButtonText: '🖨️ Print', denyButtonText: '➕ New bill', cancelButtonText: 'Close',
+                    confirmButtonColor: '#2563eb', denyButtonColor: '#16a34a'
+                }).then(r => { if (r.isConfirmed) doPrint(); else if (r.isDenied) location.href = 'billing.php'; });
+            } else { toast(res.msg, 'ok'); }
             document.getElementById('inv_no').textContent = res.invoice_no;
             if (res.grand !== undefined) {
                 document.getElementById('ui_grand').innerText = Number(res.grand).toFixed(2);

@@ -150,7 +150,7 @@ $company = load_company($pdo, $me);
                         <button type="button" class="btn btn-light btn-sm" onclick='openReset(<?php echo (int)$s['id']; ?>, <?php echo json_encode($s['full_name'], JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_HEX_TAG); ?>)'>🔑 Password</button>
                         <form method="POST"><input type="hidden" name="id" value="<?php echo (int)$s['id']; ?>">
                             <button class="btn btn-warn btn-sm" name="toggle_staff" value="1"><?php echo $s['IsActive'] ? 'Disable' : 'Enable'; ?></button></form>
-                        <form method="POST" onsubmit="return confirm('Delete this staff member? This cannot be undone.')"><input type="hidden" name="id" value="<?php echo (int)$s['id']; ?>">
+                        <form method="POST" data-confirm="Delete <?php echo e($s['full_name']); ?>?" data-confirm-text="This cannot be undone. (If they ever made an invoice, disable them instead.)" data-confirm-btn="Yes, delete" data-danger><input type="hidden" name="id" value="<?php echo (int)$s['id']; ?>">
                             <button class="btn btn-danger btn-sm" name="delete_staff" value="1">Delete</button></form>
                     </td>
                 </tr>

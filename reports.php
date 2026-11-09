@@ -167,7 +167,7 @@ $export_qs = http_build_query(array_filter(['admin' => $filter_admin ?: '', 'q' 
             <a class="btn btn-light" href="reports.php<?php echo $filter_admin ? '?admin=' . $filter_admin : ''; ?>">← Back</a>
             <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
             <?php if ($can_cancel): ?>
-            <form method="POST" onsubmit="return confirm('Cancel this invoice? The sold quantities will be added back to stock.');" style="display:inline">
+            <form method="POST" data-confirm="Cancel invoice #<?php echo e($invoice['invoice_no']); ?>?" data-confirm-text="The sold quantities will be added back to stock." data-confirm-btn="Yes, cancel invoice" data-danger style="display:inline">
                 <input type="hidden" name="id" value="<?php echo (int)$invoice['id']; ?>">
                 <button class="btn btn-danger" name="cancel_invoice" value="1">🗑️ Cancel invoice</button>
             </form>
@@ -311,7 +311,7 @@ $export_qs = http_build_query(array_filter(['admin' => $filter_admin ?: '', 'q' 
                         <td data-label="Action" style="text-align:right;white-space:nowrap">
                             <a class="btn btn-primary btn-sm" href="?view=<?php echo (int)$inv['id']; ?>">View</a>
                             <?php if ($can_cancel): ?>
-                            <form method="POST" style="display:inline" onsubmit="return confirm('Cancel invoice #<?php echo e($inv['invoice_no']); ?>? Stock will be added back.');">
+                            <form method="POST" style="display:inline" data-confirm="Cancel invoice #<?php echo e($inv['invoice_no']); ?>?" data-confirm-text="Stock will be added back." data-confirm-btn="Yes, cancel invoice" data-danger>
                                 <input type="hidden" name="id" value="<?php echo (int)$inv['id']; ?>">
                                 <button class="btn btn-danger btn-sm" name="cancel_invoice" value="1">Cancel</button>
                             </form>

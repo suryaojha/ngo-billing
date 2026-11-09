@@ -1,6 +1,7 @@
 <?php
 session_start();
 require 'config.php';
+require 'ui.php';   // SweetAlert popups + shared helpers
 
 // Only superadmin allowed
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'superadmin') {
@@ -209,6 +210,7 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
     </style>
 </head>
 <body>
+<?php echo ui_swal(); ?>
 
 <!-- SIDEBAR -->
 <div class="sidebar">
@@ -232,9 +234,15 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
 <!-- MAIN CONTENT -->
 <div class="main">
 
-    <?php echo $msg; ?>
-    <?php if(isset($_GET['saved'])): ?><div class="alert alert-success">✅ Company profile saved.</div><?php endif; ?>
-    <?php if(isset($_GET['blocked'])): ?><div class="alert alert-danger">This admin still has staff, stock or invoices, so it can't be deleted. Use <strong>Disable</strong> instead.</div><?php endif; ?>
+    <?php
+    // all notices are shown as SweetAlert popups
+    $popup = null;
+    if ($msg !== '')                    $popup = [strpos($msg, 'alert-success') !== false ? 'success' : 'error', trim(strip_tags($msg))];
+    elseif (isset($_GET['saved']))      $popup = ['success', 'Company profile saved.'];
+    elseif (isset($_GET['blocked']))    $popup = ['error', "This admin still has staff, stock or invoices, so it can't be deleted. Use Disable instead."];
+    if ($popup): ?>
+    <script>document.addEventListener('DOMContentLoaded',function(){uiFlash(<?php echo json_encode($popup[0]); ?>,<?php echo json_encode($popup[1], JSON_HEX_TAG | JSON_HEX_AMP); ?>)});</script>
+    <?php endif; ?>
 
     <!-- DASHBOARD TAB -->
     <div class="tab-content <?php echo $tab==='dashboard'?'active':''; ?>">
@@ -332,7 +340,7 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
                                 <a href="?tab=users&edit_company=<?php echo $u['id']; ?>" class="btn" style="background:#e0e7ff;color:#3730a3;font-size:12px;padding:6px 12px;">Company Profile</a>
                             <?php endif; ?>
                             <a href="?toggle=<?php echo $u['id']; ?>" class="btn btn-warning"><?php echo $u['IsActive']?'Disable':'Enable'; ?></a>
-                            <a href="?del_user=<?php echo $u['id']; ?>" class="btn btn-danger" onclick="return confirm('Delete this user?')">Delete</a>
+                            <a href="?del_user=<?php echo $u['id']; ?>" class="btn btn-danger" data-confirm="Delete <?php echo htmlspecialchars($u['full_name']); ?>?" data-confirm-text="This cannot be undone. Admins who still have staff, stock or invoices can't be deleted — disable them instead." data-confirm-btn="Yes, delete" data-danger>Delete</a>
                         </td>
                     </tr>
                     <?php endforeach; ?>
