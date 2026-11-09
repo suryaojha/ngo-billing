@@ -22,8 +22,9 @@ $list_admin = $me;
 if ($is_super) {
     $list_admin = null;
     if (!empty($_GET['admin'])) {
-        $c = $pdo->prepare("SELECT id FROM users WHERE id=? AND role='admin'");
-        $c->execute([(int)$_GET['admin']]);
+        // an admin's business, or the superadmin's own warehouse
+        $c = $pdo->prepare("SELECT id FROM users WHERE id=? AND (role='admin' OR id=?)");
+        $c->execute([(int)$_GET['admin'], $me]);
         if ($c->fetch()) $list_admin = (int)$_GET['admin'];
     }
 }
@@ -39,7 +40,7 @@ function sheet_stock(PDO $pdo, ?int $adminId, bool $showAdmin, string $q, string
     $rows = [];
     foreach (filter_products($st->fetchAll(), $q, $status) as $p) {
         $qty = (int)$p['stock_qty'];
-        $r = $showAdmin ? [$p['admin_name'] ?? 'Unassigned'] : [];
+        $r = $showAdmin ? [((int)$p['admin_id'] === (int)($_SESSION['user_id'] ?? -1) && ($_SESSION['role'] ?? '') === 'superadmin') ? 'My warehouse' : ($p['admin_name'] ?? 'Unassigned')] : [];
         array_push($r, $p['name'], $p['batch'], $p['expiry'], $p['capacity'], (float)$p['rate'], (float)$p['gst_percent'], $qty,
             round(max(0, $qty) * (float)$p['rate'], 2), $qty <= 0 ? 'Out of stock' : ($qty <= LOW_STOCK_LIMIT ? 'Low stock' : 'In stock'),
             ['expired' => 'Expired', 'soon' => 'Expiring ≤90 days', 'ok' => 'OK', '' => ''][expiry_state($p['expiry'])]);
@@ -116,7 +117,16 @@ try {
         $sheets['Stock']         = sheet_stock($pdo, $list_admin, $showAdmin, '', '');
         $sheets['Invoices']      = sheet_invoices($pdo, $role, $list_admin, [], false, $showAdmin);
         $sheets['Invoice Items'] = sheet_items($pdo, $role, $list_admin, [], false, $showAdmin);
-        if ($is_super) $sheets['Users'] = sheet_users($pdo);
+        if ($is_super) {
+            $sheets['Users'] = sheet_users($pdo);
+            try {   // warehouse → admin assignments (table is created by inventory.php on first visit)
+                $rows = [];
+                foreach ($pdo->query("SELECT t.*, u.full_name AS admin_name FROM stock_transfers t LEFT JOIN users u ON u.id=t.to_admin ORDER BY t.created_at DESC, t.id DESC")->fetchAll() as $t) {
+                    $rows[] = [date('Y-m-d H:i', strtotime($t['created_at'])), $t['product_name'], $t['batch'], $t['expiry'], (int)$t['qty'], (float)$t['rate'], $t['admin_name'] ?? ''];
+                }
+                $sheets['Assignments'] = ['headers' => ['Date', 'Medicine', 'Batch', 'Expiry', 'Qty', 'Rate (₹)', 'Assigned to'], 'rows' => $rows, 'money' => [5]];
+            } catch (Throwable $e) { /* no transfers yet */ }
+        }
         $file = "backup_all_$stamp";
     }
     send_workbook($file, $sheets);

@@ -52,8 +52,10 @@ They share only `config.php` (PDO connection) and the database. They have **sepa
 
 **Pagination:** `page_params()` + `pager()` in `ui.php` (10/25/50/100 rows, page links keep all other filters). Invoices (`reports.php`) and donations (`admin.php`) paginate and filter **in SQL**; stock (`inventory.php`) filters/paginates in PHP via `filter_products()` while the stat cards always cover the whole stock. Shared filter builder for invoices: `invoice_where()`.
 
+**Warehouse → admin flow (stock model):** the superadmin owns a central **warehouse** = rows in `products` whose `admin_id` is the superadmin's own user id (no new column). The superadmin *adds* stock only to their own warehouse (`add_product`, the one place a name/batch is typed). Giving stock to an admin is `assign_stock` in `inventory.php`: dropdown of warehouse products ("Name — Batch — Exp — N in stock"), dropdown of admins, quantity (≤ warehouse stock, rate defaults to the warehouse rate) → in one transaction: guarded decrement of the warehouse row, top-up (same name+batch) or create the admin's row, and a row in `stock_transfers` (auto-created; see `migration_warehouse.sql`). Admins never get stock any other way.
+
 **Role rules (agreed with the owner):**
-- **superadmin** — sees ALL stock and ALL invoices (with admin / customer / made-by), adds/edits/deletes stock, creates **admins only**, may bill on behalf of an admin.
+- **superadmin** — sees ALL stock (own warehouse + every admin's) and ALL invoices (with admin / customer / made-by), adds stock to the warehouse, assigns it to admins, edits/deletes stock, creates **admins only**, may bill on behalf of an admin.
 - **admin** — sees only their own stock, staff and invoices; bills directly; creates their own staff in `team.php`; stock is view-only (superadmin supplies it).
 - **staff** — sees (read-only) and bills from their admin's stock only; sees only invoices they made themselves; stock *value* is hidden; cannot log in if their admin is disabled.
 
