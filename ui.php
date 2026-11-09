@@ -37,9 +37,10 @@ function ui_nav(string $active): string {
     $role = $_SESSION['role'] ?? '';
     $links = [];
     if ($role === 'superadmin') $links[] = ['superadmin.php', '🏠 Dashboard', 'dashboard'];
-    if (in_array($role, ['admin', 'superadmin'], true)) $links[] = ['inventory.php', '📦 Stock', 'stock'];
+    $links[] = ['inventory.php', '📦 Stock', 'stock'];          // superadmin: all admins · admin: own · staff: their admin's (read-only)
     $links[] = ['billing.php', '🧾 Billing', 'billing'];
     $links[] = ['reports.php', '📊 Invoices', 'reports'];
+    if ($role === 'admin') $links[] = ['team.php', '👥 My Team', 'team'];
 
     $roleLabel = ['superadmin' => 'Super Admin', 'admin' => 'Admin', 'staff' => 'Staff'][$role] ?? '';
     $h  = '<nav class="topnav no-print"><div class="topnav-in">';
