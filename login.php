@@ -13,6 +13,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $stmt->execute([$username]);
         $user = $stmt->fetch();
 
+        // A staff member can only log in while the admin they belong to is active.
+        if ($user && $user['role'] === 'staff') {
+            $own = $pdo->prepare("SELECT COUNT(*) FROM users WHERE id=? AND role='admin' AND IsActive=1");
+            $own->execute([(int)$user['admin_id']]);
+            if (!(int)$own->fetchColumn()) {
+                $user = false;
+                $error = "Your admin account is disabled or missing. Please contact your admin.";
+            }
+        }
+
         if ($user && $password === $user['password']) {
             $_SESSION['user_id']   = $user['id'];
             $_SESSION['username']  = $user['username'];
@@ -28,7 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 header("Location: billing.php");
             }
             exit;
-        } else {
+        } elseif ($error === "") {
             $error = "Invalid Credentials. Access Denied.";
         }
     } else {

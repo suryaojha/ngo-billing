@@ -15,21 +15,22 @@ if (isset($_POST['create_admin'])) {
     $uname = trim($_POST['username']);
     $fname = trim($_POST['full_name']);
     $pass  = $_POST['password'];
-    $role  = $_POST['role'] ?? ''; // admin or staff
-    $aid   = ($role === 'staff') ? (int)($_POST['admin_id'] ?? 0) : null;
+    // The superadmin creates ADMINS only. Each admin creates their own staff (see team.php).
+    $role  = 'admin';
+    $aid   = null;
 
     $check = $pdo->prepare("SELECT id FROM users WHERE username=?");
     $check->execute([$uname]);
-    if (!in_array($role, ['admin', 'staff'], true) || $uname === '' || $fname === '' || $pass === '') {
-        $msg = '<div class="alert alert-danger">Please fill in name, username, password and a valid role.</div>';
-    } elseif ($role === 'staff' && !$aid) {
-        $msg = '<div class="alert alert-danger">A staff member must be assigned to an admin, otherwise they cannot bill.</div>';
+    if ($uname === '' || $fname === '' || $pass === '') {
+        $msg = '<div class="alert alert-danger">Please fill in name, username and password.</div>';
+    } elseif (trim($_POST['company_name'] ?? '') === '') {
+        $msg = '<div class="alert alert-danger">Company name is required — it is printed on every invoice of this admin.</div>';
     } elseif ($check->fetch()) {
         $msg = '<div class="alert alert-danger">Username already exists.</div>';
     } else {
         $pdo->prepare("INSERT INTO users (username,full_name,password,role,admin_id,company_name,company_address,gstin,company_phone) VALUES (?,?,?,?,?,?,?,?,?)")
-            ->execute([$uname, $fname, $pass, $role, $aid, $_POST['company_name'] ?? null, $_POST['company_address'] ?? null, $_POST['gstin'] ?? null, $_POST['company_phone'] ?? null]);
-        $msg = '<div class="alert alert-success">User created successfully!</div>';
+            ->execute([$uname, $fname, $pass, $role, $aid, trim($_POST['company_name']), $_POST['company_address'] ?? null, $_POST['gstin'] ?? null, $_POST['company_phone'] ?? null]);
+        $msg = '<div class="alert alert-success">Admin "' . htmlspecialchars($fname) . '" created. They can now log in, and add their own staff from the Team page.</div>';
     }
 }
 
@@ -218,10 +219,10 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
     <nav class="sidebar-nav">
         <a href="?tab=dashboard" class="nav-item <?php echo $tab==='dashboard'?'active':''; ?>"><span>🏠</span> Dashboard</a>
         <a href="?tab=users" class="nav-item <?php echo $tab==='users'?'active':''; ?>"><span>👥</span> Manage Users</a>
-        <a href="?tab=create" class="nav-item <?php echo $tab==='create'?'active':''; ?>"><span>➕</span> Create User</a>
+        <a href="?tab=create" class="nav-item <?php echo $tab==='create'?'active':''; ?>"><span>➕</span> Create Admin</a>
         <a href="inventory.php" class="nav-item"><span>📦</span> All Stock</a>
         <a href="billing.php" class="nav-item"><span>🧾</span> Create Bill</a>
-        <a href="?tab=invoices" class="nav-item <?php echo $tab==='invoices'?'active':''; ?>"><span>📚</span> All Invoices</a>
+        <a href="reports.php" class="nav-item"><span>📚</span> All Invoices</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="logout-btn">🚪 Logout</a>
@@ -308,7 +309,7 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
             <p>All admins and staff members</p>
         </div>
         <div class="card">
-            <div class="card-title">All Users <a href="?tab=create" class="btn btn-primary" style="float:right;font-size:13px;">+ Create User</a></div>
+            <div class="card-title">Admins &amp; their staff <a href="?tab=create" class="btn btn-primary" style="float:right;font-size:13px;">+ Create Admin</a></div>
             <table class="rt">
                 <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Belongs To</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
@@ -367,11 +368,11 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
     <!-- CREATE USER TAB -->
     <div class="tab-content <?php echo $tab==='create'?'active':''; ?>">
         <div class="page-header">
-            <h1>Create New User</h1>
-            <p>Add a new admin (subadmin) or staff member</p>
+            <h1>Create New Admin</h1>
+            <p>Each admin is a separate business with its own stock, invoices and letterhead. Admins add their own billing staff.</p>
         </div>
         <div class="card" style="max-width:700px;">
-            <div class="card-title">User Details</div>
+            <div class="card-title">Admin Login</div>
             <form method="POST">
                 <div class="form-grid" style="margin-bottom:15px;">
                     <div class="form-group">
@@ -386,31 +387,15 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
                         <label>Password</label>
                         <input type="text" name="password" placeholder="Set password" required>
                     </div>
-                    <div class="form-group">
-                        <label>Role</label>
-                        <select name="role" id="roleSelect" onchange="toggleAdminField()">
-                            <option value="admin">Admin (Subadmin)</option>
-                            <option value="staff">Staff (Substaff)</option>
-                        </select>
-                    </div>
-                    <div class="form-group" id="adminField" style="display:none;">
-                        <label>Assign to Admin</label>
-                        <select name="admin_id">
-                            <option value="">-- Select Admin --</option>
-                            <?php foreach($admins as $a): ?>
-                                <option value="<?php echo $a['id']; ?>"><?php echo htmlspecialchars($a['full_name']); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
                 </div>
                 <div id="companyFields" class="form-grid" style="margin-bottom:15px;">
-                    <div class="form-group"><label>Company Name</label><input type="text" name="company_name" placeholder="e.g. Anjani E.H Pharma"></div>
+                    <div class="form-group"><label>Company Name *</label><input type="text" name="company_name" placeholder="e.g. Anjani E.H Pharma" required></div>
                     <div class="form-group"><label>GSTIN</label><input type="text" name="gstin" placeholder="Optional, can add later"></div>
                     <div class="form-group"><label>Phone</label><input type="text" name="company_phone"></div>
                     <div class="form-group" style="grid-column:1/-1;"><label>Address</label><input type="text" name="company_address"></div>
                 </div>
-                <p style="color:#94a3b8;font-size:12px;margin-top:-10px;">Company details are only needed for an Admin (a business) — this becomes their invoice letterhead. Bank details can be added afterwards from Manage Users → Company Profile.</p>
-                <button type="submit" name="create_admin" class="btn btn-primary">✅ Create User</button>
+                <p style="color:#94a3b8;font-size:12px;margin-top:-10px;">This becomes the invoice letterhead. Bank details can be added afterwards from Manage Users → Company Profile.</p>
+                <button type="submit" name="create_admin" class="btn btn-primary">✅ Create Admin</button>
             </form>
         </div>
     </div>
@@ -448,12 +433,5 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
 
 </div><!-- /main -->
 
-<script>
-function toggleAdminField() {
-    const role = document.getElementById('roleSelect').value;
-    document.getElementById('adminField').style.display = role === 'staff' ? 'block' : 'none';
-    document.getElementById('companyFields').style.display = role === 'staff' ? 'none' : 'grid';
-}
-</script>
 </body>
 </html>

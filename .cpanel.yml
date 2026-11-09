@@ -1,11 +1,11 @@
 ---
 # cPanel "Deploy HEAD Commit" copies ONLY the site's PHP files into public_html:
-#   - billing system : login, logout, billing, inventory, reports, superadmin, ui
+#   - billing system : login, logout, billing, inventory, reports, superadmin, team, ui
 #   - NGO website    : index.php (public site) and admin.php (CMS)
 # Deliberately NOT copied: config.php (keeps the server's own DB settings), uploads/ (live images),
 # and all .sql / .log / .md files.
 deployment:
   tasks:
     - export DEPLOYPATH=/home/reli446436/public_html/
-    - /bin/cp login.php logout.php billing.php inventory.php reports.php superadmin.php ui.php $DEPLOYPATH
+    - /bin/cp login.php logout.php billing.php inventory.php reports.php superadmin.php team.php ui.php $DEPLOYPATH
     - /bin/cp index.php admin.php $DEPLOYPATH

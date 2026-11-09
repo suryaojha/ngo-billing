@@ -82,7 +82,8 @@ $invoice = null; $items = [];
 $view_id = (int)($_GET['view'] ?? 0);
 if ($view_id) {
     if ($scope_admin) {
-        $st = $pdo->prepare("SELECT i.*, u.full_name AS made_by FROM invoices i LEFT JOIN users u ON u.id=i.created_by WHERE i.id=? AND i.status=1 AND i.admin_id=?");
+        // staff may only open invoices they made themselves; admins see their whole business
+        $st = $pdo->prepare("SELECT i.*, u.full_name AS made_by FROM invoices i LEFT JOIN users u ON u.id=i.created_by WHERE i.id=? AND i.status=1 AND i.admin_id=?" . ($role === 'staff' ? " AND i.created_by=" . (int)$_SESSION['user_id'] : ""));
         $st->execute([$view_id, $scope_admin]);
     } else {
         $st = $pdo->prepare("SELECT i.*, u.full_name AS made_by FROM invoices i LEFT JOIN users u ON u.id=i.created_by WHERE i.id=? AND i.status=1");
@@ -103,12 +104,13 @@ $company   = load_company($pdo, $invoice ? ($invoice['admin_id'] ?: $scope_admin
  * ------------------------------------------------------------------ */
 $recent_invoices = [];
 if (!$invoice) {
-    $sql = "SELECT i.*, a.full_name AS admin_name, COUNT(ii.id) AS item_count
+    $sql = "SELECT i.*, a.full_name AS admin_name, c.full_name AS made_by, COUNT(ii.id) AS item_count
             FROM invoices i
             LEFT JOIN invoice_items ii ON ii.invoice_id=i.id
             LEFT JOIN users a ON a.id=i.admin_id
-            WHERE i.status=1" . ($list_admin ? " AND i.admin_id=?" : "") . "
-            GROUP BY i.id, a.full_name ORDER BY i.created_at DESC LIMIT 1000";
+            LEFT JOIN users c ON c.id=i.created_by
+            WHERE i.status=1" . ($list_admin ? " AND i.admin_id=?" : "") . ($role === 'staff' ? " AND i.created_by=" . (int)$_SESSION['user_id'] : "") . "
+            GROUP BY i.id, a.full_name, c.full_name ORDER BY i.created_at DESC LIMIT 1000";
     $st = $pdo->prepare($sql);
     $st->execute($list_admin ? [$list_admin] : []);
     $recent_invoices = $st->fetchAll();
@@ -270,7 +272,7 @@ if (!$invoice) {
 
             <table class="data rt" id="invTable">
                 <thead>
-                    <tr><th>Invoice</th><?php if ($is_super): ?><th>Admin</th><?php endif; ?><th>Customer</th><th>Items</th><th>Amount</th><th>Date</th><th style="text-align:right">Action</th></tr>
+                    <tr><th>Invoice</th><?php if ($is_super): ?><th>Admin</th><?php endif; ?><th>Customer</th><?php if ($role !== 'staff'): ?><th>Made by</th><?php endif; ?><th>Items</th><th>Amount</th><th>Date</th><th style="text-align:right">Action</th></tr>
                 </thead>
                 <tbody>
                 <?php foreach ($recent_invoices as $inv): ?>
@@ -278,7 +280,8 @@ if (!$invoice) {
                         data-text="<?php echo e(strtolower($inv['invoice_no'] . ' ' . $inv['customer_name'] . ' ' . $inv['customer_phone'])); ?>">
                         <td data-label="Invoice"><strong>#<?php echo e($inv['invoice_no']); ?></strong></td>
                         <?php if ($is_super): ?><td data-label="Admin"><span class="badge b-blue"><?php echo e($inv['admin_name'] ?? '—'); ?></span></td><?php endif; ?>
-                        <td data-label="Customer"><?php echo e($inv['customer_name']); ?></td>
+                        <td data-label="Customer"><?php echo e($inv['customer_name']); ?><?php if (!empty($inv['customer_phone'])): ?><br><small class="muted" style="color:var(--muted)"><?php echo e($inv['customer_phone']); ?></small><?php endif; ?></td>
+                        <?php if ($role !== 'staff'): ?><td data-label="Made by"><?php echo e($inv['made_by'] ?: '—'); ?></td><?php endif; ?>
                         <td data-label="Items"><?php echo (int)$inv['item_count']; ?></td>
                         <td data-label="Amount"><strong>₹<?php echo number_format((float)$inv['total_amount'], 2); ?></strong></td>
                         <td data-label="Date"><?php echo date('d-M-Y', strtotime($inv['created_at'])); ?></td>
@@ -294,7 +297,7 @@ if (!$invoice) {
                     </tr>
                 <?php endforeach; ?>
                 <?php if (empty($recent_invoices)): ?>
-                    <tr><td colspan="7" class="no-label" style="text-align:center;color:#94a3b8;padding:30px;">No invoices yet.</td></tr>
+                    <tr><td colspan="8" class="no-label" style="text-align:center;color:#94a3b8;padding:30px;">No invoices yet.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>

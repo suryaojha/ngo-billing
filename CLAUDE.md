@@ -26,6 +26,7 @@ They share only `config.php` (PDO connection) and the database. They have **sepa
 | `admin.php` | NGO site | CMS panel (UI refreshed via an appended CSS block at the end of the `<style>`; logic untouched). Login via `Users` table (capital U) by **Email**; sets `$_SESSION['admin']`. Tabs: donations (approve/reject), media/gallery, campaigns, events, partners, testimonials, about, contact, settings (QR/UPI), theme (colors, logo, bg, hero video, section order/visibility). AJAX actions via `$_POST['ajax']` + `action`. "Delete" is a soft delete (`IsActive=0`). |
 | `login.php` | Billing | Login via `users` table (lowercase) by **username**; sets `user_id, username, role, full_name, admin_id`. Redirects: superadmin→`superadmin.php`, admin→`inventory.php`, staff→`billing.php`. |
 | `logout.php` | Billing | Destroys session → `login.php`. |
+| `team.php` | Billing | **Admin-only** "My Team": an admin creates/disables/deletes (blocked if they made invoices)/resets password of their own billing staff (`role='staff'`, `admin_id` = that admin). Superadmin cannot create staff — `superadmin.php` creates **admins only**. |
 | `ui.php` | Billing | Shared helpers for the billing pages: responsive top nav (`ui_nav`), base CSS (`ui_css`), invoice sheet CSS (`ui_invoice_css`, desktop A4 + mobile cards + print), `e()` escape, flash messages, `expiry_state()`, `num_to_words()`, `load_company()`. `LOW_STOCK_LIMIT = 10`. |
 | `billing.php` | Billing | Invoice builder (A4 print on desktop, card rows + sticky Save bar on mobile). Staff/admin/superadmin. **Superadmin picks an admin ("bill on behalf of"; stored in `$_SESSION['bill_for']`, switch with `?for=ID`)**: stock is deducted from and the invoice filed under that admin, `created_by` = superadmin. AJAX `?action=search`; POST `save_invoice`. |
 | `inventory.php` | Billing | Stock page. Admin: view own stock + sales history (read-only). Superadmin: all-admins overview cards, filter by admin (`?admin=ID`), 2-step "Add stock" form (pick admin → live info panel with company/GSTIN/current stock, live duplicate-batch detection, summary bar + confirm before assigning), per-product details modal (value, units sold, last sold), **edit** product (stock/rate/expiry/GST), merge duplicates, delete (POST), "Create bill" shortcut per admin. |
@@ -47,6 +48,11 @@ They share only `config.php` (PDO connection) and the database. They have **sepa
 - `products` — stock rows: `name, batch, expiry, capacity, rate, stock_qty, gst_percent, admin_id`. Unique `(admin_id, name, batch)` (after `migration_fixes.sql`). Low-stock threshold in UI is `< 10`.
 - `invoices` — `invoice_no` (zero-padded string, e.g. `007`), `customer_*`, `total_amount`, `gst_percent`, `admin_id`, `created_by`, `status` (1 = live, 0 = soft-deleted). Unique `(admin_id, invoice_no)`. (`staff_id` column also exists but is unused.)
 - `invoice_items` — `invoice_id` (FK, ON DELETE CASCADE), `product_id` (nullable for legacy rows), `product_name, batch, expiry, capacity, qty, rate, discount, gross_amount`.
+
+**Role rules (agreed with the owner):**
+- **superadmin** — sees ALL stock and ALL invoices (with admin / customer / made-by), adds/edits/deletes stock, creates **admins only**, may bill on behalf of an admin.
+- **admin** — sees only their own stock, staff and invoices; bills directly; creates their own staff in `team.php`; stock is view-only (superadmin supplies it).
+- **staff** — sees (read-only) and bills from their admin's stock only; sees only invoices they made themselves; stock *value* is hidden; cannot log in if their admin is disabled.
 
 **Tenant resolution:**
 `staff → $_SESSION['admin_id']`, `admin → $_SESSION['user_id']`, `superadmin → null (sees all)` for reports/inventory; in `billing.php` the superadmin must choose an admin, so billing always has a concrete `$stock_admin_id`. Queries use `admin_id <=> ?` (null-safe). **Every new billing query must apply this scope.**

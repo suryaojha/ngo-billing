@@ -3,14 +3,25 @@ session_start();
 require 'config.php';
 require 'ui.php';
 
-if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role'], ['admin', 'superadmin'], true)) {
+if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role'], ['admin', 'superadmin', 'staff'], true)) {
     header("Location: login.php");
     exit;
 }
 
 $role     = $_SESSION['role'];
 $is_super = ($role === 'superadmin');
-$admin_id = $is_super ? null : (int)$_SESSION['user_id'];
+$is_staff = ($role === 'staff');
+// superadmin: every admin's stock · admin: own stock · staff: their admin's stock (read-only)
+$admin_id = $is_super ? null : ($is_staff ? (int)($_SESSION['admin_id'] ?? 0) : (int)$_SESSION['user_id']);
+if (!$is_super && !$admin_id) {
+    die('Your account is not linked to a business yet. Please ask your admin to fix your account.');
+}
+$biz_name = '';
+if (!$is_super) {
+    $bq = $pdo->prepare("SELECT COALESCE(NULLIF(company_name,''), full_name) FROM users WHERE id=?");
+    $bq->execute([$admin_id]);
+    $biz_name = (string)$bq->fetchColumn();
+}
 
 // Active admins (businesses) — used by the superadmin forms/filters.
 $admins = [];
@@ -210,7 +221,7 @@ if (isset($_GET['view_history'])) {
     if ($view_history) {
         $h = $pdo->prepare("SELECT ii.qty, ii.created_at, i.invoice_no, i.customer_name
                             FROM invoice_items ii JOIN invoices i ON ii.invoice_id=i.id
-                            WHERE i.status=1 AND i.admin_id <=> ?
+                            WHERE i.status=1 AND i.admin_id <=> ?" . ($is_staff ? " AND i.created_by=" . (int)$_SESSION['user_id'] : "") . "
                               AND (ii.product_id = ? OR (ii.product_id IS NULL AND ii.product_name=? AND ii.batch=?))
                             ORDER BY ii.created_at DESC");
         $h->execute([$view_history['admin_id'], $pid, $view_history['name'], $view_history['batch']]);
@@ -290,8 +301,8 @@ html{scroll-behavior:smooth}
 
     <div class="page-head">
         <div>
-            <h1>📦 <?php echo $is_super ? 'Stock — all admins' : 'Your stock'; ?></h1>
-            <p><?php echo $is_super ? 'Assign stock to admins, track levels and expiry, and bill on their behalf.' : 'Live stock levels, expiry and sales for your business.'; ?></p>
+            <h1>📦 <?php echo $is_super ? 'Stock — all admins' : ($is_staff ? 'Available stock' : 'Your stock'); ?></h1>
+            <p><?php echo $is_super ? 'Assign stock to admins, track levels and expiry, and bill on their behalf.' : ($is_staff ? 'Stock you can bill from — ' . e($biz_name) . '.' : 'Live stock levels, expiry and sales for ' . e($biz_name) . '.'); ?></p>
         </div>
         <?php if ($is_super): ?>
         <div class="ph-acts">
@@ -302,7 +313,7 @@ html{scroll-behavior:smooth}
     </div>
 
     <?php if (!$is_super): ?>
-        <div class="alert alert-info">To add or change products, contact the Super Admin.</div>
+        <div class="alert alert-info"><?php echo $is_staff ? 'View only. This is your admin\'s stock — it goes down automatically as you make invoices.' : 'View only. To add or change products, contact the Super Admin.'; ?></div>
     <?php endif; ?>
 
     <?php if ($is_super && !empty($possible_duplicates)): ?>
@@ -372,7 +383,7 @@ html{scroll-behavior:smooth}
         <div class="stat-card"><h3>Low stock (≤<?php echo LOW_STOCK_LIMIT; ?>)</h3><p style="color:var(--warn);"><?php echo $low_stock; ?></p></div>
         <div class="stat-card"><h3>Out of stock</h3><p style="color:var(--danger);"><?php echo $out_stock; ?></p></div>
         <div class="stat-card"><h3>Expired / ≤90 days</h3><p style="color:var(--danger);"><?php echo $exp_count; ?></p></div>
-        <div class="stat-card"><h3>Stock value</h3><p style="color:var(--success);">₹<?php echo number_format($total_value, 0); ?></p></div>
+        <?php if (!$is_staff): ?><div class="stat-card"><h3>Stock value</h3><p style="color:var(--success);">₹<?php echo number_format($total_value, 0); ?></p></div><?php endif; ?>
     </div>
 
     <?php if ($is_super): ?>
@@ -440,7 +451,7 @@ html{scroll-behavior:smooth}
         <table class="data rt" id="inventoryTable">
             <thead><tr>
                 <?php if ($is_super): ?><th>Admin</th><?php endif; ?>
-                <th>Product</th><th>Batch</th><th>Expiry</th><th>Rate</th><th>Stock</th><th>Value</th><th>Status</th><th style="text-align:right">Actions</th>
+                <th>Product</th><th>Batch</th><th>Expiry</th><th>Rate</th><th>Stock</th><?php if (!$is_staff): ?><th>Value</th><?php endif; ?><th>Status</th><th style="text-align:right">Actions</th>
             </tr></thead>
             <tbody>
             <?php foreach ($products as $p):
@@ -453,7 +464,7 @@ html{scroll-behavior:smooth}
                     'company' => $ai['company'] ?? '', 'gstin' => $ai['gstin'] ?? '',
                     'name' => $p['name'], 'batch' => $p['batch'], 'capacity' => $p['capacity'], 'expiry' => $p['expiry'], 'exp' => $ex,
                     'rate' => $p['rate'], 'gst' => $p['gst_percent'], 'stock' => max(0, $q),
-                    'value' => max(0, $q) * (float)$p['rate'],
+                    'value' => $is_staff ? 0 : max(0, $q) * (float)$p['rate'],
                     'sold' => (int)($sv['sold'] ?? 0), 'last' => $sv ? date('d-M-Y', strtotime($sv['last_sold'])) : '—',
                 ];
                 $j = json_encode($detail, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_HEX_TAG);
@@ -466,7 +477,7 @@ html{scroll-behavior:smooth}
                         <?php if ($ex === 'expired'): ?> <span class="badge b-red">Expired</span><?php elseif ($ex === 'soon'): ?> <span class="badge b-amber">Expiring</span><?php endif; ?></td>
                     <td data-label="Rate">₹<?php echo e($p['rate']); ?> <small class="muted">· GST <?php echo e(rtrim(rtrim(number_format((float)$p['gst_percent'], 2), '0'), '.')); ?>%</small></td>
                     <td data-label="Stock"><span class="stock-num"><?php echo max(0, $q); ?></span></td>
-                    <td data-label="Value">₹<?php echo number_format(max(0, $q) * (float)$p['rate'], 0); ?></td>
+                    <?php if (!$is_staff): ?><td data-label="Value">₹<?php echo number_format(max(0, $q) * (float)$p['rate'], 0); ?></td><?php endif; ?>
                     <td data-label="Status">
                         <?php if ($q <= 0): ?><span class="badge b-red">Out of stock</span>
                         <?php elseif ($q <= LOW_STOCK_LIMIT): ?><span class="badge b-amber">Low stock</span>
@@ -569,6 +580,7 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money = n => '₹' + Number(n || 0).toLocaleString('en-IN', {maximumFractionDigits: 2});
 const IS_SUPER = <?php echo $is_super ? 'true' : 'false'; ?>;
+const IS_STAFF = <?php echo $is_staff ? 'true' : 'false'; ?>;
 const QS_ADMIN = <?php echo json_encode($qs_admin); ?>;
 const ADMINS = <?php echo json_encode((object)$admin_info, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
 const PRODS  = <?php echo json_encode($all_products_min, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
@@ -677,11 +689,11 @@ function openDetail(p) {
     else if (p.exp === 'soon') st += ' <span class="badge b-amber">Expiring within 90 days</span>';
     $('d_status').innerHTML = st;
     const cells = [
-        ['Stock on hand', p.stock + ' units'], ['Stock value', money(p.value)],
-        ['Rate / unit', money(p.rate)], ['GST', parseFloat(p.gst) + '%'],
-        ['Expiry', p.expiry || '—'], ['Units sold (all time)', p.sold],
-        ['Last sold', p.last],
+        ['Stock on hand', p.stock + ' units'], ['Rate / unit', money(p.rate)],
+        ['GST', parseFloat(p.gst) + '%'], ['Expiry', p.expiry || '—'],
+        ['Units sold (all time)', p.sold], ['Last sold', p.last],
     ];
+    if (!IS_STAFF) cells.splice(1, 0, ['Stock value', money(p.value)]);
     if (p.admin) { cells.unshift(['Assigned to', p.admin + (p.company ? ' — ' + p.company : '')]); if (p.gstin) cells.push(['Admin GSTIN', p.gstin]); }
     $('d_grid').innerHTML = cells.map(c => `<div class="dcell"><small>${esc(c[0])}</small><b>${esc(c[1])}</b></div>`).join('');
     let acts = `<a class="btn btn-light btn-sm" href="?view_history=${p.id}${QS_ADMIN}">📊 Sales history</a>`;
