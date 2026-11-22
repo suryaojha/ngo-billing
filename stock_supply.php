@@ -107,7 +107,7 @@ $invoices=$isSuper
  ? $pdo->query("SELECT si.*,u.full_name AS admin_name,COALESCE((SELECT SUM(sp.amount) FROM supply_payments sp WHERE sp.supply_invoice_id=si.id),0) AS received FROM supply_invoices si JOIN users u ON u.id=si.admin_id ORDER BY si.created_at DESC LIMIT 300")->fetchAll()
  : $pdo->prepare("SELECT si.*,COALESCE((SELECT SUM(sp.amount) FROM supply_payments sp WHERE sp.supply_invoice_id=si.id),0) AS received FROM supply_invoices si WHERE si.admin_id=? ORDER BY si.created_at DESC");
 if(!$isSuper){$invoices->execute([$me]);$invoices=$invoices->fetchAll();}
-$summary=$isSuper ? $pdo->query("SELECT u.id,u.full_name,COALESCE(SUM(si.total_amount),0) AS billed,COALESCE(SUM((SELECT SUM(sp.amount) FROM supply_payments sp WHERE sp.supply_invoice_id=si.id)),0) AS received FROM users u LEFT JOIN supply_invoices si ON si.admin_id=u.id WHERE u.role='admin' GROUP BY u.id,u.full_name ORDER BY u.full_name")->fetchAll() : [];
+$summary=$isSuper ? $pdo->query("SELECT u.id,u.full_name,COALESCE(SUM(si.total_amount),0) AS billed,COALESCE(SUM(COALESCE(pay.received,0)),0) AS received FROM users u LEFT JOIN supply_invoices si ON si.admin_id=u.id LEFT JOIN (SELECT supply_invoice_id,SUM(amount) AS received FROM supply_payments GROUP BY supply_invoice_id) pay ON pay.supply_invoice_id=si.id WHERE u.role='admin' GROUP BY u.id,u.full_name ORDER BY u.full_name")->fetchAll() : [];
 $allBills=$isSuper ? $pdo->query("SELECT p.id,p.name,p.batch,p.stock_qty,p.rate FROM products p WHERE p.admin_id IS NULL AND p.stock_qty>0 ORDER BY p.name,p.batch")->fetchAll() : [];
 $viewSupplyId=(int)($_GET['view_supply'] ?? 0); $viewSupply=null; $viewItems=[]; $viewPayments=[];
 if ($viewSupplyId) {
