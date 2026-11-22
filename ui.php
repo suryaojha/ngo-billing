@@ -36,10 +36,17 @@ function expiry_state($exp): string {
 function ui_nav(string $active): string {
     $role = $_SESSION['role'] ?? '';
     $links = [];
-    if ($role === 'superadmin') $links[] = ['superadmin.php', '🏠 Dashboard', 'dashboard'];
-    $links[] = ['inventory.php', '📦 Stock', 'stock'];          // superadmin: all admins · admin: own · staff: their admin's (read-only)
-    $links[] = ['billing.php', '🧾 Billing', 'billing'];
-    $links[] = ['reports.php', '📊 Invoices', 'reports'];
+    if ($role === 'superadmin') {
+        $links[] = ['superadmin.php', '🏠 Dashboard', 'dashboard'];
+        $links[] = ['inventory.php', '📦 Stock', 'stock'];
+        $links[] = ['stock_supply.php', '📦 Supply & Payments', 'supply'];
+        $links[] = ['reports.php', '📊 Admin Sales', 'reports'];
+    } else {
+        $links[] = ['inventory.php', '📦 Stock', 'stock'];
+        $links[] = ['billing.php', '🧾 Billing', 'billing'];
+        $links[] = ['reports.php', '📊 Invoices', 'reports'];
+        if ($role === 'admin') $links[] = ['stock_supply.php', '📥 Request Stock', 'supply'];
+    }
     if ($role === 'admin') $links[] = ['team.php', '👥 My Team', 'team'];
 
     $roleLabel = ['superadmin' => 'Super Admin', 'admin' => 'Admin', 'staff' => 'Staff'][$role] ?? '';

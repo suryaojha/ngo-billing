@@ -50,10 +50,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if(!$src) throw new Exception('Main-stock product not found.');
             if((int)$src['stock_qty']<$qty) throw new Exception('Insufficient Super Admin stock. Available: '.(int)$src['stock_qty']);
             $rate=round((float)$src['rate'],2); $line=round($rate*$qty,2);
-            $max=$pdo->query("SELECT COALESCE(MAX(id),0)+1 FROM supply_invoices")->fetchColumn();
-            $invoiceNo='SUP-'.date('Y').'-'.str_pad((string)$max,5,'0',STR_PAD_LEFT);
+            $temporaryNo='TMP-'.bin2hex(random_bytes(8));
             $ins=$pdo->prepare("INSERT INTO supply_invoices(invoice_no,admin_id,created_by,stock_request_id,total_amount) VALUES(?,?,?,?,?)");
-            $ins->execute([$invoiceNo,$adminId,$me,$requestId ?: null,$line]); $supplyId=(int)$pdo->lastInsertId();
+            $ins->execute([$temporaryNo,$adminId,$me,$requestId ?: null,$line]); $supplyId=(int)$pdo->lastInsertId();
+            $invoiceNo='SUP-'.date('Y').'-'.str_pad((string)$supplyId,5,'0',STR_PAD_LEFT);
+            $pdo->prepare("UPDATE supply_invoices SET invoice_no=? WHERE id=?")->execute([$invoiceNo,$supplyId]);
             $dest=$pdo->prepare("SELECT id FROM products WHERE admin_id=? AND name=? AND batch=? LIMIT 1"); $dest->execute([$adminId,$src['name'],$src['batch']]);
             $destId=(int)($dest->fetchColumn() ?: 0);
             if($destId) $pdo->prepare("UPDATE products SET stock_qty=stock_qty+?,expiry=?,capacity=? WHERE id=? AND admin_id=?")->execute([$qty,$src['expiry'],$src['capacity'],$destId,$adminId]);
