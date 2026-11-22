@@ -11,6 +11,12 @@ if (!isset($_SESSION['user_id'])) {
 $role    = $_SESSION['role'];
 $user_id = (int)$_SESSION['user_id'];
 
+// Super Admin sells stock only to Admins; customer billing is Admin/Staff-only.
+if ($role === 'superadmin') {
+    header('Location: stock_supply.php');
+    exit;
+}
+
 /* ------------------------------------------------------------------
  * Which business (admin) are we billing for?
  *   staff       -> the admin they belong to
@@ -633,8 +639,9 @@ function saveInvoiceToDB() {
             document.querySelectorAll('#invoiceCanvas input').forEach(i => i.readOnly = true);
             document.querySelectorAll('.c-del,.add-row-btn').forEach(el => el.style.display = 'none');
             document.querySelectorAll('.js-save').forEach(b => b.style.display = 'none');
-            document.querySelectorAll('.js-print,.js-new').forEach(b => { b.style.display = 'inline-block'; b.disabled = false; });
-            window.scrollTo({top: 0, behavior: 'smooth'});
+            // Open the already-saved invoice in its dedicated print view.
+            // This GET never creates an invoice or changes stock.
+            window.location.href = 'reports.php?view=' + encodeURIComponent(res.invoice_id) + '&print=1';
         } else {
             toast(res.msg || 'Could not save', 'err');
             setSaving(false);

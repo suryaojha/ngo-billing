@@ -99,7 +99,9 @@ foreach ($pdo->query("
            (SELECT COUNT(*) FROM users s WHERE s.admin_id=u.id AND s.role='staff') AS staff_count,
            (SELECT COUNT(*) FROM products p WHERE p.admin_id=u.id) AS prod_count,
            (SELECT IFNULL(SUM(GREATEST(p.stock_qty,0)),0) FROM products p WHERE p.admin_id=u.id) AS units,
-           (SELECT IFNULL(SUM(GREATEST(p.stock_qty,0)*p.rate),0) FROM products p WHERE p.admin_id=u.id) AS val
+           (SELECT IFNULL(SUM(GREATEST(p.stock_qty,0)*p.rate),0) FROM products p WHERE p.admin_id=u.id) AS val,
+           (SELECT IFNULL(SUM(si.total_amount),0) FROM supply_invoices si WHERE si.admin_id=u.id) AS supply_billed,
+           (SELECT IFNULL(SUM(sp.amount),0) FROM supply_payments sp JOIN supply_invoices si ON si.id=sp.supply_invoice_id WHERE si.admin_id=u.id) AS supply_received
     FROM users u WHERE u.role='admin'")->fetchAll() as $r) {
     $admin_stats[(int)$r['id']] = $r;
 }
@@ -221,8 +223,8 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         <a href="?tab=users" class="nav-item <?php echo $tab==='users'?'active':''; ?>"><span>👥</span> Manage Users</a>
         <a href="?tab=create" class="nav-item <?php echo $tab==='create'?'active':''; ?>"><span>➕</span> Create Admin</a>
         <a href="inventory.php" class="nav-item"><span>📦</span> All Stock</a>
-        <a href="billing.php" class="nav-item"><span>🧾</span> Create Bill</a>
-        <a href="reports.php" class="nav-item"><span>📚</span> All Invoices</a>
+        <a href="stock_supply.php" class="nav-item"><span>📦</span> Supply Bills & Payments</a>
+        <a href="reports.php" class="nav-item"><span>📚</span> Admin Sales Invoices</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="logout-btn">🚪 Logout</a>
@@ -256,7 +258,7 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
         <div class="card">
             <div class="card-title">👥 Admins, Staff &amp; Stock</div>
             <table class="rt">
-                <thead><tr><th>Admin</th><th>Company / GSTIN</th><th>Staff</th><th>Products</th><th>Units</th><th>Stock value</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Admin</th><th>Company / GSTIN</th><th>Staff</th><th>Products</th><th>Units</th><th>Stock value</th><th>Supply billed</th><th>Received</th><th>Pending</th><th>Actions</th></tr></thead>
                 <tbody>
                     <?php foreach($admins as $a):
                         $s = $admin_stats[(int)$a['id']] ?? ['staff_count'=>0,'prod_count'=>0,'units'=>0,'val'=>0];
@@ -268,14 +270,17 @@ $all_products = $pdo->query("SELECT p.*, u.full_name as admin_name FROM products
                         <td data-label="Products"><span class="badge badge-admin"><?php echo (int)$s['prod_count']; ?></span></td>
                         <td data-label="Units"><?php echo number_format((int)$s['units']); ?></td>
                         <td data-label="Stock value">₹<?php echo number_format((float)$s['val'],0); ?></td>
+                        <td data-label="Supply billed">₹<?php echo number_format((float)($s['supply_billed'] ?? 0),2); ?></td>
+                        <td data-label="Received">₹<?php echo number_format((float)($s['supply_received'] ?? 0),2); ?></td>
+                        <td data-label="Pending"><strong>₹<?php echo number_format(max(0,(float)($s['supply_billed'] ?? 0)-(float)($s['supply_received'] ?? 0)),2); ?></strong></td>
                         <td data-label="Actions">
                             <a href="inventory.php?admin=<?php echo (int)$a['id']; ?>" class="btn" style="background:#e0e7ff;color:#3730a3;font-size:12px;padding:6px 12px;">📦 Stock</a>
-                            <a href="billing.php?for=<?php echo (int)$a['id']; ?>" class="btn btn-primary" style="font-size:12px;padding:6px 12px;">🧾 Create bill</a>
+                            <a href="stock_supply.php" class="btn btn-primary" style="font-size:12px;padding:6px 12px;">🧾 Supply bill / Collect</a>
                         </td>
                     </tr>
                     <?php endforeach; ?>
                     <?php if(empty($admins)): ?>
-                        <tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:30px;">No admins yet. <a href="?tab=create">Create one</a></td></tr>
+                        <tr><td colspan="10" style="text-align:center;color:#94a3b8;padding:30px;">No admins yet. <a href="?tab=create">Create one</a></td></tr>
                     <?php endif; ?>
                 </tbody>
             </table>

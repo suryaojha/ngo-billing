@@ -319,5 +319,8 @@ if (!$invoice) {
     filterList();
     </script>
 <?php endif; ?>
+<?php if ($invoice && isset($_GET['print']) && $_GET['print'] === '1'): ?>
+<script>window.addEventListener('load', function(){ window.print(); });</script>
+<?php endif; ?>
 </body>
 </html>
